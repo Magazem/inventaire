@@ -7,25 +7,25 @@
  * logic is written on top of it. If /health is green, everything after
  * is application code rather than infrastructure guesswork.
  */
- 
+
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data, null, 2), {
     status,
     headers: { 'content-type': 'application/json; charset=utf-8' },
   });
- 
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
- 
+
     if (url.pathname === '/health') return json(await health(env));
     if (url.pathname === '/') return new Response(page(), {
       headers: { 'content-type': 'text/html; charset=utf-8' },
     });
- 
+
     return json({ error: 'not_found', path: url.pathname }, 404);
   },
- 
+
   /** Queue consumer — the AI pipeline lands here (design §5.3). */
   async queue(batch, env, ctx) {
     for (const msg of batch.messages) {
@@ -39,7 +39,7 @@ export default {
       }
     }
   },
- 
+
   /**
    * Daily sweep. Free-plan queue messages expire after 24h, so a job can
    * vanish silently; the database is the truth and re-queues anything
@@ -57,11 +57,11 @@ export default {
     console.log(`sweep re-queued ${stranded.results?.length ?? 0}`);
   },
 };
- 
+
 /** Prove every binding is actually live, not merely configured. */
 async function health(env) {
   const out = { ok: true, checked_at: new Date().toISOString(), bindings: {} };
- 
+
   try {
     const r = await env.DB.prepare(
       `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'`
@@ -72,7 +72,7 @@ async function health(env) {
     out.ok = false;
     out.bindings.d1 = { ok: false, error: String(e) };
   }
- 
+
   try {
     const key = '_health/probe.txt';
     await env.PHOTOS.put(key, `ok ${new Date().toISOString()}`);
@@ -83,7 +83,7 @@ async function health(env) {
     out.ok = false;
     out.bindings.r2 = { ok: false, error: String(e) };
   }
- 
+
   try {
     await env.JOBS.send({ probe: true, at: new Date().toISOString() });
     out.bindings.queue = { ok: true, note: 'test message sent' };
@@ -91,24 +91,18 @@ async function health(env) {
     out.ok = false;
     out.bindings.queue = { ok: false, error: String(e) };
   }
- 
-  // Secrets Store secrets are objects with .get(), not strings. Checking
-  // truthiness alone would pass on a binding that resolves to nothing.
-  try {
-    const v = await env.LONGCAT_API_KEY.get();
-    const ok = typeof v === 'string' && v.length > 10;
-    out.bindings.longcat_key = { ok, note: ok
-      ? `secret readable (${v.length} chars)`   // never log the value itself
-      : 'binding resolved but the secret is empty' };
-    if (!ok) out.ok = false;
-  } catch (e) {
-    out.ok = false;
-    out.bindings.longcat_key = { ok: false, error: String(e) };
-  }
- 
+
+  // Plain worker secret: a string, present only at runtime.
+  const key = env.LONGCAT_API_KEY;
+  const ok = typeof key === 'string' && key.length > 10;
+  out.bindings.longcat_key = { ok, note: ok
+    ? `secret readable (${key.length} chars)`      // never log the value
+    : 'not set — run: npx wrangler secret put LONGCAT_API_KEY' };
+  if (!ok) out.ok = false;
+
   return out;
 }
- 
+
 function page() {
   return `<!doctype html><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -131,4 +125,3 @@ function page() {
   <code>github.com/Magazem/inventaire</code> via GitHub Actions.</p>
 </div>`;
 }
- 
