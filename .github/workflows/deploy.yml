@@ -13,12 +13,48 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - run: npm install
 
-      # schema.sql is idempotent (CREATE TABLE IF NOT EXISTS), so running it
-      # on every deploy is safe and keeps the database in step with the code.
+      # ---- DIAGNOSTICS ------------------------------------------------
+      # These run first and cannot fail the build. If a later step breaks,
+      # their output says why: wrong account, missing permission, or a
+      # resource the token cannot see.
+      - name: Who am I
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: whoami
+
+      - name: List D1 databases visible to this token
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 list
+
+      - name: List R2 buckets visible to this token
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 bucket list
+
+      - name: List queues visible to this token
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: queues list
+
+      # ---- THE REAL WORK ----------------------------------------------
+      # schema.sql is idempotent, so running it on every deploy is safe.
       - name: Apply database schema
         uses: cloudflare/wrangler-action@v3
         with:
