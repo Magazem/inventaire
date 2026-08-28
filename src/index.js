@@ -1,37 +1,59 @@
 /**
  * Inventaire — Phase A capture backend.
  * See spec/data-model.md (frozen) and spec/output-contract.md.
- *
- * This first deploy is deliberately small: it proves the chain
- * (GitHub → Actions → Cloudflare → D1 + R2 + Queue) before any real
- * logic is written on top of it. If /health is green, everything after
- * is application code rather than infrastructure guesswork.
  */
+import { capturePage } from './capture-page.js';
+import { makeSession, whoami, checkPassword } from './auth.js';
+import { listsHandler, lookupHandler, photoHandler,
+         createItemHandler, recentHandler } from './api.js';
 
-const json = (data, status = 200) =>
-  new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: { 'content-type': 'application/json; charset=utf-8' },
-  });
+const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
+  status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
+    const p = url.pathname;
 
-    if (url.pathname === '/health') return json(await health(env));
-    if (url.pathname === '/') return new Response(page(), {
-      headers: { 'content-type': 'text/html; charset=utf-8' },
-    });
+    if (p === '/health') return json(await health(env));
+    if (p === '/' || p === '/capture')
+      return new Response(capturePage(), {
+        headers: { 'content-type': 'text/html; charset=utf-8',
+                   'cache-control': 'no-store' } });
 
-    return json({ error: 'not_found', path: url.pathname }, 404);
+    if (p === '/api/login' && request.method === 'POST') {
+      const { password, who } = await request.json();
+      if (!(await checkPassword(env, password))) return json({ error: 'bad' }, 401);
+      const name = (who || 'inconnu').slice(0, 40).replace(/[|]/g, '');
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'content-type': 'application/json',
+                   'set-cookie': await makeSession(env, name) } });
+    }
+
+    // Everything below requires a session.
+    if (p.startsWith('/api/')) {
+      const who = await whoami(request, env);
+      if (!who) return json({ error: 'unauthorized' }, 401);
+
+      if (p === '/api/lists') return listsHandler(env);
+      if (p === '/api/recent') return recentHandler(env);
+      if (p === '/api/models/lookup' && request.method === 'POST')
+        return lookupHandler(request, env);
+      if (p === '/api/photos' && request.method === 'POST')
+        return photoHandler(request, env);
+      if (p === '/api/items' && request.method === 'POST')
+        return createItemHandler(request, env, who);
+    }
+
+    return json({ error: 'not_found', path: p }, 404);
   },
 
-  /** Queue consumer — the AI pipeline lands here (design §5.3). */
-  async queue(batch, env, ctx) {
+  /** AI pipeline consumer. Lands here from /api/items and from the sweep. */
+  async queue(batch, env) {
     for (const msg of batch.messages) {
       try {
-        console.log('job received', JSON.stringify(msg.body));
-        // Pipeline arrives in the next push. Ack so nothing is stranded.
+        console.log('job', JSON.stringify(msg.body));
+        // Pipeline arrives next. Ack so nothing is stranded meanwhile.
         msg.ack();
       } catch (err) {
         console.error('job failed', err);
@@ -42,86 +64,53 @@ export default {
 
   /**
    * Daily sweep. Free-plan queue messages expire after 24h, so a job can
-   * vanish silently; the database is the truth and re-queues anything
-   * stranded (design §5.1, data model §3.3).
+   * vanish silently; the database is the truth (design §5.1).
    */
-  async scheduled(event, env, ctx) {
-    const stranded = await env.DB
-      .prepare(`SELECT model_id FROM models
-                 WHERE ia_etat = 'pending' AND ia_tentatives < 3
-                 LIMIT 50`)
-      .all();
-    for (const row of stranded.results ?? []) {
+  async scheduled(event, env) {
+    const stranded = await env.DB.prepare(
+      `SELECT model_id FROM models
+        WHERE ia_etat = 'pending' AND ia_tentatives < 3 LIMIT 50`).all();
+    for (const row of stranded.results ?? [])
       await env.JOBS.send({ model_id: row.model_id, reason: 'sweep' });
-    }
     console.log(`sweep re-queued ${stranded.results?.length ?? 0}`);
   },
 };
 
-/** Prove every binding is actually live, not merely configured. */
 async function health(env) {
   const out = { ok: true, checked_at: new Date().toISOString(), bindings: {} };
+  try {
+    const t = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'`).first();
+    const c = await env.DB.prepare(`SELECT COUNT(*) AS n FROM categories`).first();
+    const m = await env.DB.prepare(`SELECT COUNT(*) AS n FROM models`).first();
+    const u = await env.DB.prepare(`SELECT COUNT(*) AS n FROM units`).first();
+    out.bindings.d1 = { ok: true, tables: t.n, categories: c.n, models: m.n, units: u.n };
+  } catch (e) { out.ok = false; out.bindings.d1 = { ok: false, error: String(e) }; }
 
   try {
-    const r = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'`
-    ).first();
-    const cats = await env.DB.prepare(`SELECT COUNT(*) AS n FROM categories`).first();
-    out.bindings.d1 = { ok: true, tables: r.n, categories: cats.n };
-  } catch (e) {
-    out.ok = false;
-    out.bindings.d1 = { ok: false, error: String(e) };
-  }
-
-  try {
-    const key = '_health/probe.txt';
-    await env.PHOTOS.put(key, `ok ${new Date().toISOString()}`);
-    const back = await env.PHOTOS.get(key);
+    const k = '_health/probe.txt';
+    await env.PHOTOS.put(k, `ok ${new Date().toISOString()}`);
+    const back = await env.PHOTOS.get(k);
     out.bindings.r2 = { ok: !!back, read_back: back ? await back.text() : null };
     if (!back) out.ok = false;
-  } catch (e) {
-    out.ok = false;
-    out.bindings.r2 = { ok: false, error: String(e) };
-  }
+  } catch (e) { out.ok = false; out.bindings.r2 = { ok: false, error: String(e) }; }
 
   try {
     await env.JOBS.send({ probe: true, at: new Date().toISOString() });
     out.bindings.queue = { ok: true, note: 'test message sent' };
-  } catch (e) {
-    out.ok = false;
-    out.bindings.queue = { ok: false, error: String(e) };
-  }
+  } catch (e) { out.ok = false; out.bindings.queue = { ok: false, error: String(e) }; }
 
-  // Plain worker secret: a string, present only at runtime.
   const key = env.LONGCAT_API_KEY;
-  const ok = typeof key === 'string' && key.length > 10;
-  out.bindings.longcat_key = { ok, note: ok
-    ? `secret readable (${key.length} chars)`      // never log the value
-    : 'not set — run: npx wrangler secret put LONGCAT_API_KEY' };
-  if (!ok) out.ok = false;
+  const kok = typeof key === 'string' && key.length > 10;
+  out.bindings.longcat_key = { ok: kok, note: kok
+    ? `secret readable (${key.length} chars)` : 'not set' };
+  if (!kok) out.ok = false;
+
+  const pw = env.CAPTURE_PASSWORD;
+  const pok = typeof pw === 'string' && pw.length >= 8;
+  out.bindings.capture_password = { ok: pok, note: pok
+    ? 'set' : 'NOT SET — the capture app is unusable until you run: wrangler secret put CAPTURE_PASSWORD' };
+  if (!pok) out.ok = false;
 
   return out;
-}
-
-function page() {
-  return `<!doctype html><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Inventaire — backend</title>
-<style>
- body{font:16px/1.6 system-ui,sans-serif;max-width:640px;margin:8vh auto;padding:0 20px;
-      color:#16191d;background:#f4f5f7}
- h1{font-size:24px;margin:0 0 4px} p{color:#4a5159}
- .card{background:#fff;border:1px solid #d9dde2;border-radius:12px;padding:20px;margin-top:20px}
- a{color:#1b4d8f} code{background:#eceff3;padding:2px 6px;border-radius:4px;font-size:14px}
- .pill{display:inline-block;background:#e4f3ea;color:#1a6b3c;font-weight:650;
-       padding:3px 10px;border-radius:20px;font-size:14px}
-</style>
-<h1>Inventaire — backend</h1>
-<p><span class="pill">déployé</span> Phase A. Capture app not built yet.</p>
-<div class="card">
-  <p><a href="/health">/health</a> — checks that D1, R2 and the queue are
-  genuinely reachable, not just configured.</p>
-  <p style="margin-bottom:0">Deployed from
-  <code>github.com/Magazem/inventaire</code> via GitHub Actions.</p>
-</div>`;
 }
