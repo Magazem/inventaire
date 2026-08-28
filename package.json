@@ -9,6 +9,6 @@
     "schema": "wrangler d1 execute inventaire --remote --file=./schema.sql"
   },
   "devDependencies": {
-    "wrangler": "^3.90.0"
+    "wrangler": "^4.127.0"
   }
 }

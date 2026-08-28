@@ -11,9 +11,10 @@ database_id   = "6ba0cb6b-6152-47c4-9e93-803d42a543c1"
 
 # ---- R2: photos --------------------------------------------------------
 [[r2_buckets]]
-binding     = "PHOTOS"
-bucket_name = "inventaire-photos"
-jurisdiction = "eu"
+binding      = "PHOTOS"
+bucket_name  = "inventaire-photos"
+jurisdiction = "eu"          # hard EU data-residency boundary, not just a hint.
+                             # CLI commands need --jurisdiction eu or they 404.
 
 # ---- Queue: AI jobs ----------------------------------------------------
 # Free plan retains messages for 24h only, so the DB is the truth and a
@@ -33,9 +34,15 @@ max_concurrency     = 2
 [triggers]
 crons = ["0 3 * * *"]
 
+# ---- Secrets Store: LongCat key. Account-level, never in git. ----------
+# Arrives as an object: use `await env.LONGCAT_API_KEY.get()`, not a string.
+[[secrets_store_secrets]]
+binding     = "LONGCAT_API_KEY"
+store_id    = "846906a86652466ba525b11dd41543f6"
+secret_name = "LONGCAT_API_KEY"
+
 [vars]
 SCHEMA_VERSION = "1"
 
-# Secrets are NOT here. Set with:
-#   npx wrangler secret put LONGCAT_API_KEY
-# or in the dashboard under Settings → Variables → Encrypt.
+# The LongCat key lives in the account Secrets Store (bound above), so it
+# never appears in this repository or in the build.
