@@ -13,6 +13,7 @@ database_id   = "6ba0cb6b-6152-47c4-9e93-803d42a543c1"
 [[r2_buckets]]
 binding     = "PHOTOS"
 bucket_name = "inventaire-photos"
+jurisdiction = "eu"
 
 # ---- Queue: AI jobs ----------------------------------------------------
 # Free plan retains messages for 24h only, so the DB is the truth and a
