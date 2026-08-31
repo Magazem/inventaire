@@ -467,6 +467,21 @@ export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = 
                : 'nothing reachable at all — needs a human-supplied manual (D57)' };
 }
 
+/** Fetch a PDF and convert it to markdown. Shared by acquire and guide. */
+export async function fetchMarkdown(env, url) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'user-agent': 'Mozilla/5.0 (inventaire manual fetcher)' },
+      redirect: 'follow' });
+    if (!r.ok) return null;
+    const buf = await r.arrayBuffer();
+    const conv = await env.AI.toMarkdown({
+      name: (url.split('/').pop() || 'manual.pdf').split('?')[0],
+      blob: new Blob([buf], { type: 'application/pdf' }) });
+    return conv?.data || null;
+  } catch { return null; }
+}
+
 /** Probe endpoint: /api/probe/acquire?brand=Husqvarna&model=545RXT */
 export async function probeAcquireHandler(request, env) {
   const u = new URL(request.url);

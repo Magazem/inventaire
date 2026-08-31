@@ -5,7 +5,9 @@
 import { capturePage } from './capture-page.js';
 import { inspectPage } from './inspect-page.js';
 import { probePdfHandler } from './probe.js';
-import { probeSourceHandler, probeAcquireHandler } from './source.js';
+import { probeSourceHandler, probeAcquireHandler,
+         acquireManual, fetchMarkdown } from './source.js';
+import { probeGuideHandler } from './guide.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
 import { listsHandler, lookupHandler, photoHandler, createItemHandler,
          recentHandler, inspectHandler, photoGetHandler } from './api.js';
@@ -52,6 +54,8 @@ export default {
       if (p === '/api/probe/pdf') return probePdfHandler(request, env);
       if (p === '/api/probe/source') return probeSourceHandler(request, env);
       if (p === '/api/probe/acquire') return probeAcquireHandler(request, env);
+      if (p === '/api/probe/guide')
+        return probeGuideHandler(request, env, { acquireManual, fetchMarkdown });
       if (p === '/api/models/lookup' && request.method === 'POST')
         return lookupHandler(request, env);
       if (p === '/api/photos' && request.method === 'POST')
