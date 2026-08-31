@@ -65,12 +65,14 @@ export function inspectPage() {
   button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);
          background:transparent;color:var(--ink);cursor:pointer}
   a{color:var(--accent)}
+  .mini{font-size:12px;padding:3px 9px;border-radius:999px}
 </style>
 <header>
   <h1>Inventaire — contrôle</h1>
   <span class="counts" id="counts">chargement…</span>
   <span style="flex:1"></span>
   <button onclick="load()">Rafraîchir</button>
+  <button onclick="requeue()">Relancer tout ce qui attend</button>
   <a href="/capture">→ saisie</a>
 </header>
 <main id="out"><p class="empty">chargement…</p></main>
@@ -99,6 +101,15 @@ function tagsFor(m){
   if (m.suivi === 'quantite') t.push('<span class="tag">suivi par quantité</span>');
   if (m.ia_erreur) t.push('<span class="tag b">' + esc(m.ia_erreur).slice(0,80) + '</span>');
   return '<div class="tags">' + t.join('') + '</div>';
+}
+
+async function requeue(id){
+  const q = id ? ('?model_id=' + encodeURIComponent(id)) : '';
+  const r = await fetch('/api/requeue' + q, { method: 'POST' });
+  const d = await r.json();
+  document.getElementById('counts').textContent =
+    (d.queued || 0) + ' modèle(s) relancé(s) — recharger dans une minute';
+  setTimeout(load, 1500);
 }
 
 async function load(){
@@ -138,6 +149,9 @@ async function load(){
           ' · ' + esc(m.created_by) + ' le ' + esc((m.created_at||'').slice(0,16).replace('T',' ')) +
         '</div>' +
         tagsFor(m) +
+        (m.manual_state === 'sans_objet' ? '' :
+          '<div class="tags"><button class="mini" onclick="requeue(\'' +
+          esc(m.model_id) + '\')">Relancer l\'IA pour ce modèle</button></div>') +
         (us.length ? '<div class="units">Exemplaires : ' +
            us.map(u => '<span>' + esc(u.unit_id) + (u.emplacement ? ' · ' + esc(u.emplacement) : '') +
                        '</span>').join('') + '</div>' : '') +

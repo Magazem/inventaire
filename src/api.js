@@ -260,3 +260,48 @@ export async function photoGetHandler(request, env) {
     },
   });
 }
+
+/**
+ * Re-queue a model for the AI pipeline.
+ *
+ * Needed because a capture only queues a job when the model is NEW (D32 —
+ * a second Honda must not pay for the same guide twice). So anything
+ * captured before the pipeline existed, or whose job expired from the free
+ * plan's 24 h queue, sits at `ia_etat: pending` forever with no way to nudge
+ * it except waiting for the 03:00 sweep. This is that nudge.
+ */
+export async function requeueHandler(request, env, who) {
+  const u = new URL(request.url);
+  const one = u.searchParams.get('model_id');
+
+  const rows = one
+    ? await env.DB.prepare(
+        `SELECT model_id, manual_state FROM models WHERE model_id = ?`).bind(one).all()
+    : await env.DB.prepare(
+        `SELECT model_id, manual_state FROM models
+          WHERE ia_etat IN ('pending','failed') AND manual_state != 'sans_objet'
+          LIMIT 50`).all();
+
+  const out = [];
+  for (const r of rows.results || []) {
+    // A human ticking "pas besoin de mode d'emploi" is authoritative and the
+    // pipeline never overrides it (data model §3.1).
+    if (r.manual_state === 'sans_objet') {
+      out.push({ model_id: r.model_id, skipped: 'sans_objet — set by a human' });
+      continue;
+    }
+    await env.DB.prepare(
+      `UPDATE models SET ia_etat='pending', ia_tentatives=0, ia_erreur=NULL,
+              manual_state = CASE WHEN manual_state='introuvable'
+                                  THEN 'a_rediger' ELSE manual_state END,
+              updated_at=? WHERE model_id=?`
+    ).bind(now(), r.model_id).run();
+    await env.JOBS.send({ type: 'source', model_id: r.model_id, reason: 'manual_requeue' });
+    await env.DB.prepare(
+      `INSERT INTO journal (at,model_id,etape,ok,detail) VALUES (?,?,?,1,?)`
+    ).bind(now(), r.model_id, 'requeued', JSON.stringify({ by: who })).run();
+    out.push({ model_id: r.model_id, queued: true });
+  }
+  if (!out.length) return json({ ok: true, note: 'nothing was waiting', queued: 0 });
+  return json({ ok: true, queued: out.filter(o => o.queued).length, models: out });
+}

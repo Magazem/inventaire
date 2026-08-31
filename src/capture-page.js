@@ -36,6 +36,13 @@ button{font:inherit;font-weight:650;font-size:17px;border:0;border-radius:12px;
 .shot.has{border-style:solid;border-color:var(--ok)}
 .shot .tag{position:absolute;inset-inline-start:6px;top:6px;background:#000a;color:#fff;
  font-size:12px;padding:2px 7px;border-radius:6px}
+/* 44px minimum: a gloved thumb in a workshop, not a mouse pointer (ISO 9241-410). */
+.shot .kill{position:absolute;inset-inline-end:4px;top:4px;width:44px;height:44px;
+ min-height:0;padding:0;border:0;border-radius:50%;background:#000b;color:#fff;
+ font-size:20px;line-height:1;display:grid;place-items:center;cursor:pointer}
+.shot .kill:active{background:#000}
+.shot .foot{position:absolute;inset-inline:0;bottom:0;background:#000a;color:#fff;
+ font-size:12px;padding:4px 6px;border-radius:0 0 10px 10px}
 .check{display:flex;gap:12px;align-items:flex-start;background:var(--warn-soft);
  border-radius:12px;padding:14px;margin-top:16px;cursor:pointer}
 .check input{width:24px;height:24px;min-height:0;flex:none;margin-top:2px}
@@ -86,10 +93,8 @@ button{font:inherit;font-weight:650;font-size:17px;border:0;border-radius:12px;
 
     <label>Photos</label>
     <div class="shots">
-      <div class="shot" id="s1"><span class="tag">1</span><span>Photo de l'appareil</span>
-        <input type="file" accept="image/*" capture="environment" hidden></div>
-      <div class="shot" id="s2"><span class="tag">2</span><span>Plaque signalétique</span>
-        <input type="file" accept="image/*" capture="environment" hidden></div>
+      <div class="shot" id="s1"></div>
+      <div class="shot" id="s2"></div>
     </div>
     <div class="hint">La plaque permet de refaire le mode d'emploi plus tard sans revenir à la machine.</div>
 
@@ -147,21 +152,93 @@ async function compress(file, max = 1600, quality = 0.72) {
   return await cv.convertToBlob({ type: 'image/jpeg', quality });
 }
 
-function wireShot(el, field) {
-  const input = el.querySelector('input');
-  el.addEventListener('click', () => input.click());
+const SLOTS = {
+  s1: { tag: '1', label: "Photo de l'appareil",  field: 'photo' },
+  s2: { tag: '2', label: 'Plaque signalétique',  field: 'photo_plaque' },
+};
+
+/** Object URLs are revoked on replace and on remove — a capture session is
+ *  hundreds of photos, and each one held open is memory on a phone. */
+const urls = { photo: null, photo_plaque: null };
+function dropUrl(field) {
+  if (urls[field]) { URL.revokeObjectURL(urls[field]); urls[field] = null; }
+}
+
+/**
+ * Draw one photo slot from state.
+ *
+ * Rebuilt from the shots object every time rather than mutated in place. The previous
+ * version patched the DOM by hand and re-ran the wiring after each submit,
+ * which stacked a new click listener on the same element every time — so by
+ * the tenth capture one tap opened the camera ten times. onclick replaces
+ * rather than appends, which removes that class of bug entirely.
+ */
+function renderShot(el) {
+  const cfg = SLOTS[el.id];
+  const blob = shots[cfg.field];
+  el.innerHTML = '';
+
+  const tag = document.createElement('span');
+  tag.className = 'tag'; tag.textContent = cfg.tag;
+  el.appendChild(tag);
+
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = 'image/*';
+  input.capture = 'environment'; input.hidden = true;
+  el.appendChild(input);
+
+  if (blob) {
+    el.classList.add('has');
+    dropUrl(cfg.field);
+    urls[cfg.field] = URL.createObjectURL(blob);
+    el.style.backgroundImage = 'url(' + urls[cfg.field] + ')';
+
+    const kill = document.createElement('button');
+    kill.type = 'button'; kill.className = 'kill'; kill.textContent = '✕';
+    kill.setAttribute('aria-label', 'Supprimer la photo ' + cfg.tag);
+    // stopPropagation, or removing the photo would immediately reopen the
+    // camera through the slot's own click handler.
+    kill.addEventListener('click', e => {
+      e.stopPropagation();
+      shots[cfg.field] = null;
+      dropUrl(cfg.field);
+      renderShot(el);
+    });
+    el.appendChild(kill);
+
+    const foot = document.createElement('span');
+    foot.className = 'foot';
+    foot.textContent = Math.round(blob.size / 1024) + ' Ko · toucher pour remplacer';
+    el.appendChild(foot);
+  } else {
+    el.classList.remove('has');
+    el.style.backgroundImage = '';
+    const t = document.createElement('span');
+    t.textContent = cfg.label;
+    el.appendChild(t);
+  }
+
+  el.onclick = () => input.click();
   input.addEventListener('change', async () => {
-    const f = input.files[0]; if (!f) return;
-    el.textContent = '…'; 
+    const f = input.files[0];
+    // Clearing the value matters: without it, picking the SAME file twice
+    // fires no change event, so a retake of an identical filename silently
+    // does nothing.
+    input.value = '';
+    if (!f) return;
+    el.innerHTML = '<span class="tag">' + cfg.tag + '</span><span>…</span>';
+    el.style.backgroundImage = '';
     try {
-      const blob = await compress(f);
-      shots[field] = blob;
-      el.style.backgroundImage = 'url(' + URL.createObjectURL(blob) + ')';
-      el.classList.add('has'); el.textContent = '';
-      const tag = document.createElement('span');
-      tag.className = 'tag'; tag.textContent = Math.round(blob.size/1024) + ' Ko';
-      el.appendChild(tag);
-    } catch (e) { el.textContent = 'échec'; }
+      shots[cfg.field] = await compress(f);
+    } catch (e) {
+      shots[cfg.field] = null;
+    }
+    renderShot(el);
+    if (!shots[cfg.field]) {
+      const err = document.createElement('span');
+      err.className = 'foot'; err.textContent = 'échec — toucher pour réessayer';
+      el.appendChild(err);
+    }
   });
 }
 
@@ -301,12 +378,8 @@ function resetForm() {
   for (const id of ['brand','mnum','name']) $('#' + id).value = '';
   $('#danger').checked = false; $('#known').classList.remove('show');
   shots.photo = shots.photo_plaque = null;
-  for (const [el, t] of [[$('#s1'),"Photo de l'appareil"],[$('#s2'),'Plaque signalétique']]) {
-    el.style.backgroundImage = ''; el.classList.remove('has');
-    el.innerHTML = '<span class="tag">' + (el.id === 's1' ? '1' : '2') + '</span><span>' + t +
-      '</span><input type="file" accept="image/*" capture="environment" hidden>';
-    wireShot(el, el.id === 's1' ? 'photo' : 'photo_plaque');
-  }
+  dropUrl('photo'); dropUrl('photo_plaque');
+  renderShot($('#s1')); renderShot($('#s2'));
   // type and category deliberately kept: you photograph in batches
 }
 
@@ -327,7 +400,7 @@ async function loadRecent() {
   } catch {}
 }
 
-wireShot($('#s1'), 'photo'); wireShot($('#s2'), 'photo_plaque');
+renderShot($('#s1')); renderShot($('#s2'));
 $('#nm').value = WHO;
 boot();
 </script></body></html>`;

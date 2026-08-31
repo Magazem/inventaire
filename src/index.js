@@ -11,7 +11,8 @@ import { probeGuideHandler } from './guide.js';
 import { runJob } from './pipeline.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
 import { listsHandler, lookupHandler, photoHandler, createItemHandler,
-         recentHandler, inspectHandler, photoGetHandler } from './api.js';
+         recentHandler, inspectHandler, photoGetHandler,
+         requeueHandler } from './api.js';
 
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -51,6 +52,8 @@ export default {
       if (p === '/api/recent') return recentHandler(env);
       if (p === '/api/inspect') return inspectHandler(env);
       if (p === '/api/photo') return photoGetHandler(request, env);
+      if (p === '/api/requeue' && request.method === 'POST')
+        return requeueHandler(request, env, who);
       // P1.2 probe — session-gated because it fetches an arbitrary URL.
       if (p === '/api/probe/pdf') return probePdfHandler(request, env);
       if (p === '/api/probe/source') return probeSourceHandler(request, env);
