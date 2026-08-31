@@ -477,6 +477,84 @@ each for the right stated reason.
 
 ---
 
+### P1.2 RUNS #5–#7 — 31 Aug 2026: sourcing works, with three honest limits
+
+Run by Claude directly against the deployed Worker.
+
+| Machine | Outcome | Provenance | Tier | Time |
+|---|---|---|---|---|
+| **Makita GA5030R** | manual acquired | `url_rule` → manufacturer | **`native`** | 5.0 s |
+| **Husqvarna 545RXT** | manual acquired | `rocha.fr` → third party | `auto` | 9.7 s |
+| **DeWalt DWE492** | nothing qualified | — | — | 12.5 s |
+
+Makita is the clean case: 136 pages, 10 languages, 95% page coverage,
+`trust_tier_allowed: native`. Nothing to change.
+
+**Run #6 — the label, not the source, was wrong.** The system accepted a
+genuine 44-page Husqvarna manual — from `lawnandgarden.manualsonline.com`,
+labelled `support_page` and therefore manufacturer-sourced. `manualsonline`
+was missing from the aggregator list, so its index page matched
+`SUPPORT_PATHS` on `/manuals/`, took the +40 support-page bonus, and laundered
+a reprint into a manufacturer document. **D53 was defeated through a side
+door.** The content was fine. The provenance was a lie.
+
+=> **A page is a support page only if the MANUFACTURER serves it.** Host
+test added. Third-party index pages are still followed — their content can
+be perfectly good — but their links take −30 instead of +40 and are stamped
+`provenance: reprint`. The trust tier is now decided once, at acquisition,
+from where the bytes came from, and travels with the document.
+
+**Run #7 — a third document structure.** Accepted `rocha.fr`: 38 pages,
+80 550 chars, French. Page 1 reads:
+
+```
+545FR, 545FX, 545FXT, 545RX, 545RXT, 545F
+DE Bedienungsanweisung 2-38   FR Manuel ...
+```
+
+`coverage: 0` — **Husqvarna does not label its pages.** So:
+
+| Structure | Example | How the language is found |
+|---|---|---|
+| Multilingual, page-labelled | Makita | `pageLanguageMap` — exact offsets |
+| **Single-language per locale** | **Husqvarna** | **whole-document detection (new)** |
+| Multilingual, unlabelled | (not yet seen) | phrase-density histogram |
+
+=> **D57a**: detect the language of a single-language document by **function
+words**, not phrases. A cover listing *DE Bedienungsanweisung / FR Manuel /
+IT Manuale* fires every phrase marker at once — run #4's trap exactly — but
+cannot outweigh thousands of "le/la/des" across a French body. Measured on
+the middle 60% to skip covers and back-matter. Tested: FR 1.00 confidence,
+DE 0.91, EN 0.92.
+
+**This changes the pipeline shape.** For pattern-B manufacturers, sourcing
+must run **once per language**, not once per model. One Makita fetch yields
+seven languages; one Husqvarna fetch yields one.
+
+**Run #7 — DeWalt has no automatic path, and that is the true answer.**
+
+- `dewalt.co.uk/product/dwe492-qs/...` **redirects to the homepage** — the
+  DWE492 is discontinued, so no manufacturer page exists. Same shape as
+  P0.3's STIHL FS 86 gap.
+- `manuals.plus` and `device.report` return **403** to the Worker.
+- Every rejection was correct: a 37-page parts list with one instruction
+  phrase; a 40-page PDF containing 1 267 characters (a scan with no text
+  layer). Both refused on content.
+
+=> **D57: a human-upload path is required, not optional.** Some manuals are
+unreachable from a datacenter and always will be — discontinued models,
+bot-blocked hosts, paper-only documents. But the manual is often in the
+drawer beside the machine, or downloads fine from an office browser where no
+403 applies. The admin page needs "attach this PDF to this model", feeding
+the same extraction pipeline from byte one. Without it, discontinued tools
+are permanently blank.
+
+`bynder.sbdinc.com` — Stanley Black & Decker's asset host, where DeWalt
+actually serves PDFs — added to the DeWalt domain list, found by reading
+their own pages.
+
+---
+
 ## P1 — Foundations
 
 **Entry:** ✔ all clear. P0.1 closed, P0.2 passed (bar Tigrinya), P0.3 done, 1.1 frozen. **Nothing blocks P1.2.**

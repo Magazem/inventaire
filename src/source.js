@@ -15,7 +15,7 @@
  * A reprint is still usable content. It simply can never be `native` (D53).
  */
 
-import { pageLanguageMap } from './probe.js';
+import { pageLanguageMap, detectLanguage } from './probe.js';
 
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -35,7 +35,10 @@ export const BRANDS = {
       `https://www.icmsmakita.eu/CMS/custom/fi/attachments/user_manuals/User_manuals_EU2/${model}.pdf`,
     ],
   },
-  DEWALT:    { domains: ['dewalt.', 'servicenet.dewalt.com', 'service.dewalt.co.uk'] },
+  // bynder.sbdinc.com is Stanley Black & Decker's asset host — where DeWalt
+  // actually serves its PDFs. Found in run #7 by reading their own pages.
+  DEWALT:    { domains: ['dewalt.', 'servicenet.dewalt.com', 'service.dewalt.co.uk',
+                         'bynder.sbdinc.com'] },
   BOSCH:     { domains: ['bosch-diy.com', 'bosch-professional.com', 'bosch-pt.com', 'bosch.'] },
   EINHELL:   { domains: ['einhell.', 'einhell-service.com'] },
   HUSQVARNA: { domains: ['husqvarna.'] },
@@ -344,6 +347,10 @@ export function qualifyManual(md, canonModel) {
   const sales = SALES_PHRASES.filter(p => lower.includes(p));
   const map = pageLanguageMap(md);
   const pages = map.total_pages || 0;
+  // When the document does not label its pages it is almost always a
+  // SINGLE-language edition (pattern B). Knowing which one is not optional:
+  // filing the French manual as German would be silent and permanent.
+  const detected = (map.coverage || 0) < 0.3 ? detectLanguage(md) : null;
 
   const reasons = [];
   let verdict = 'manual';
@@ -360,6 +367,9 @@ export function qualifyManual(md, canonModel) {
   }
   return {
     verdict, reasons,
+    structure: (map.coverage || 0) >= 0.3
+      ? 'multilingual, page-labelled' : 'single-language (or unlabelled)',
+    document_language: detected,
     model_hits: modelHits,
     instruction_phrases: instruction.length,
     sales_phrases: sales,
@@ -428,6 +438,8 @@ export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = 
                     verdict: q.verdict, reasons: q.reasons,
                     model_hits: q.model_hits, pages: q.pages, chars: q.chars,
                     instruction_phrases: q.instruction_phrases,
+                    structure: q.structure,
+                    document_language: q.document_language?.language,
                     languages: Object.keys(q.language_map.languages || {}) });
     if (q.verdict === 'manual') {
       // The trust tier is decided HERE, once, from where the bytes came
@@ -450,7 +462,9 @@ export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = 
   return { brand: found.brand, model: found.model, ranked: found.candidates,
            attempts, accepted,
            outcome: accepted ? 'manual acquired'
-                             : 'no candidate qualified — needs a hand-built rule or a human' };
+             : attempts.some(a => a.stage === 'qualify')
+               ? 'candidates found but none qualified — needs a human-supplied manual (D57)'
+               : 'nothing reachable at all — needs a human-supplied manual (D57)' };
 }
 
 /** Probe endpoint: /api/probe/acquire?brand=Husqvarna&model=545RXT */

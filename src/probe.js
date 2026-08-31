@@ -263,6 +263,68 @@ export function pageLanguageMap(md) {
   };
 }
 
+/**
+ * WHOLE-DOCUMENT LANGUAGE DETECTION.
+ *
+ * Needed because run #7 found a THIRD document structure. Two were known:
+ *
+ *   Makita   — one multilingual PDF, language name in every page header
+ *   (that one is solved by pageLanguageMap)
+ *
+ *   Husqvarna — SEPARATE per-locale documents. `rocha.fr` served the French
+ *   manual: 38 pages, no page-header labels at all, coverage 0. The page map
+ *   correctly reported failure, but "which language is this?" still has to
+ *   be answered, because pattern-B manufacturers need one source PER
+ *   LANGUAGE and we must not file the French manual as the German one.
+ *
+ * Function words, not phrases. A cover page listing "DE Bedienungsanweisung
+ * / FR Manuel / IT Manuale" fires every phrase marker at once — run #4's
+ * exact trap — but it cannot shift the balance of 8 000 occurrences of
+ * "le", "la" and "des" across a French document.
+ */
+const STOPWORDS = {
+  en: [' the ', ' and ', ' for ', ' with ', ' not ', ' this ', ' from ', ' that '],
+  fr: [' le ', ' la ', ' les ', ' des ', ' est ', ' pour ', ' avec ', ' dans ', ' une '],
+  de: [' der ', ' die ', ' das ', ' und ', ' nicht ', ' mit ', ' für ', ' den ', ' auf '],
+  it: [' il ', ' lo ', ' che ', ' per ', ' con ', ' non ', ' della ', ' nel '],
+  es: [' el ', ' los ', ' que ', ' para ', ' con ', ' del ', ' una ', ' por '],
+  pt: [' que ', ' para ', ' com ', ' não ', ' uma ', ' dos ', ' pelo ', ' está '],
+  nl: [' het ', ' een ', ' niet ', ' voor ', ' van ', ' met ', ' door ', ' deze '],
+  da: [' ikke ', ' eller ', ' skal ', ' med ', ' for ', ' den ', ' det '],
+  sv: [' inte ', ' eller ', ' ska ', ' med ', ' för ', ' den ', ' att '],
+  fi: [' että ', ' tai ', ' kun ', ' sekä ', ' jos ', ' ole '],
+  pl: [' nie ', ' lub ', ' jest ', ' oraz ', ' przez ', ' dla '],
+  tr: [' için ', ' veya ', ' bir ', ' ile ', ' değil '],
+};
+
+export function detectLanguage(text) {
+  // Middle 60% — skip covers and back-matter, which are the multilingual bits.
+  const L = text.length;
+  const body = (L > 4000 ? text.slice(Math.floor(L * 0.2), Math.floor(L * 0.8)) : text)
+    .toLowerCase().replace(/\s+/g, ' ');
+  const scores = {};
+  for (const [lang, words] of Object.entries(STOPWORDS)) {
+    let n = 0;
+    for (const w of words) {
+      let i = body.indexOf(w);
+      while (i !== -1) { n++; i = body.indexOf(w, i + 1); }
+    }
+    if (n) scores[lang] = n;
+  }
+  const ranked = Object.entries(scores).sort((a, b) => b[1] - a[1]);
+  if (!ranked.length) return { language: null, confidence: 0, scores: {} };
+  const [top, topN] = ranked[0];
+  const second = ranked[1]?.[1] || 0;
+  return {
+    language: top,
+    // How far clear of the runner-up? Romance languages share function
+    // words, so a narrow win is a real warning rather than a detail.
+    confidence: +(1 - second / topN).toFixed(2),
+    per_1k_chars: +(1000 * topN / body.length).toFixed(2),
+    scores: Object.fromEntries(ranked.slice(0, 5)),
+  };
+}
+
 export async function probePdfHandler(request, env) {
   const u = new URL(request.url);
   const target = u.searchParams.get('url');
