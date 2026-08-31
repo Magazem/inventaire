@@ -11,6 +11,7 @@
  * is delegated.
  */
 import { pageLanguageMap, detectLanguage } from './probe.js';
+import { extractPpeFromText } from './ppe.js';
 
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -396,12 +397,14 @@ export async function probeGuideHandler(request, env, deps) {
 
   const guide = await writeGuide(env, { text: slice.text, lang, brand, model });
 
-  // PPE reads the guide's own safety text where we have one, so the
-  // pictograms and the words a worker sees come from the same place.
+  // PPE is matched in CODE against the guide's own safety text (D62). No
+  // model call: the guide already names the equipment, in the target
+  // language, and choosing a pictogram from a named phrase is a string rule.
   const safetyText = guide.ok
-    ? [...(guide.sections.securite || []), ...(guide.sections.usage || [])].join('\n')
-    : slice.text.slice(0, 8000);
-  const ppe = await extractPpe(env, { text: safetyText, brand, model });
+    ? [...(guide.sections.securite || []), ...(guide.sections.usage || []),
+       ...(guide.sections.utilisation || []), ...(guide.sections.arret || [])].join('\n')
+    : slice.text.slice(0, 20_000);
+  const ppe = extractPpeFromText(safetyText, lang);
 
   const origin = {
     method: acq.accepted.trust_tier_allowed === 'native' && slice.method === 'page_headers'
