@@ -66,6 +66,26 @@ export function inspectPage() {
          background:transparent;color:var(--ink);cursor:pointer}
   a{color:var(--accent)}
   .mini{font-size:12px;padding:3px 9px;border-radius:999px}
+  .why{margin-top:10px;font-size:13px}
+  .why summary{cursor:pointer;color:var(--warn);font-weight:600}
+  .why table{margin-top:8px}
+  .muted{color:var(--muted)}
+  .acts{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap}
+  .acts button{font-size:12px;padding:4px 10px;border-radius:999px}
+  .danger{color:var(--bad);border-color:var(--bad)}
+  .card.gone{opacity:.55}
+  .card.gone .idline::after{content:' — dans la corbeille';color:var(--bad);
+    font-weight:600;font-size:13px}
+  .edit{margin-top:10px;font-size:13px}
+  .edit summary{cursor:pointer;color:var(--accent);font-weight:600}
+  .edit .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+    gap:8px;margin-top:8px}
+  .edit label{display:block;font-size:12px;color:var(--muted)}
+  .edit input{width:100%;font:inherit;padding:6px 8px;border:1px solid var(--line);
+    border-radius:8px;background:var(--bg);color:var(--ink)}
+  .warn{color:var(--warn);font-size:12px;margin-top:6px}
+  .bin{background:var(--card);border:1px solid var(--bad);border-radius:10px;
+    padding:12px;margin-bottom:14px}
 </style>
 <header>
   <h1>Inventaire — contrôle</h1>
@@ -73,6 +93,7 @@ export function inspectPage() {
   <span style="flex:1"></span>
   <button onclick="load()">Rafraîchir</button>
   <button id="requeue-all">Relancer tout ce qui attend</button>
+  <button id="purge" class="danger">Vider la corbeille</button>
   <a href="/capture">→ saisie</a>
 </header>
 <main id="out"><p class="empty">chargement…</p></main>
@@ -107,10 +128,55 @@ function tagsFor(m){
 // container outlives them. It also keeps quotes out of generated markup,
 // which is what broke this page the first time.
 document.addEventListener('click', e => {
-  const b = e.target.closest('[data-requeue]');
-  if (b) { requeue(b.getAttribute('data-requeue')); return; }
-  if (e.target.id === 'requeue-all') requeue();
+  const rq = e.target.closest('[data-requeue]');
+  if (rq) { requeue(rq.getAttribute('data-requeue')); return; }
+  if (e.target.id === 'requeue-all') { requeue(); return; }
+  if (e.target.id === 'purge') { purge(); return; }
+  const tr = e.target.closest('[data-trash]');
+  if (tr) { trash(tr.getAttribute('data-kind'), tr.getAttribute('data-trash')); return; }
+  const rs = e.target.closest('[data-restore]');
+  if (rs) { restore(rs.getAttribute('data-kind'), rs.getAttribute('data-restore')); return; }
+  const sv = e.target.closest('[data-save]');
+  if (sv) { saveEdit(sv.getAttribute('data-save')); return; }
 });
+
+const post = (url, body) => fetch(url, { method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify(body || {}) }).then(r => r.json());
+
+async function trash(kind, id){ await post('/api/trash', { kind, id }); load(); }
+async function restore(kind, id){ await post('/api/restore', { kind, id }); load(); }
+
+async function purge(){
+  const n = document.querySelectorAll('.card.gone').length;
+  const box = document.getElementById('counts');
+  // Two deliberate steps, and the second one names what it will remove.
+  if (!window.__armed) {
+    window.__armed = true;
+    box.textContent = 'Cliquer encore sur "Vider la corbeille" pour supprimer definitivement.';
+    setTimeout(() => { window.__armed = false; }, 8000);
+    return;
+  }
+  window.__armed = false;
+  const d = await post('/api/purge');
+  box.textContent = 'Supprime : ' + (d.purged?.models||0) + ' modele(s), ' +
+                    (d.purged?.units||0) + ' exemplaire(s).';
+  load();
+}
+
+async function saveEdit(id){
+  const box = document.getElementById('edit-' + id);
+  const val = n => box.querySelector('[name=' + n + ']').value.trim();
+  const d = await post('/api/models/edit', {
+    model_id: id, brand: val('brand'), model_number: val('mnum'),
+    type: val('type').toUpperCase(), name: val('name'),
+    requeue: box.querySelector('[name=rq]').checked });
+  const w = box.querySelector('.warn');
+  if (d.error) { w.textContent = d.error; return; }
+  w.textContent = (d.warnings || []).join(' | ') ||
+    ('Enregistre' + (d.requeued ? ' et relance.' : '.'));
+  setTimeout(load, 1200);
+}
 
 async function requeue(id){
   const q = id ? ('?model_id=' + encodeURIComponent(id)) : '';
@@ -119,6 +185,82 @@ async function requeue(id){
   document.getElementById('counts').textContent =
     (d.queued || 0) + ' modèle(s) relancé(s) — recharger dans une minute';
   setTimeout(load, 1500);
+}
+
+/**
+ * Why was no manual accepted?
+ *
+ * Collapsed by default — it is long, and most of the time nobody needs it.
+ * Open it and every candidate is there with its score, and every document
+ * actually fetched is there with the reason it was refused.
+ */
+// No regex literal here on purpose: a backslash inside the page's outer
+// template literal is consumed before the browser ever sees it, which is
+// what broke this file twice.
+function shortUrl(u){
+  let x = String(u || '');
+  if (x.indexOf('https://') === 0) x = x.slice(8);
+  else if (x.indexOf('http://') === 0) x = x.slice(7);
+  return x.length > 64 ? x.slice(0, 64) + '...' : x;
+}
+
+function actionRow(m){
+  if (m.corbeille)
+    return '<div class="acts"><button data-restore="' + esc(m.model_id) +
+      '" data-kind="model">Restaurer</button></div>';
+  return '<div class="acts">' +
+    (m.manual_state === 'sans_objet' ? '' :
+      '<button data-requeue="' + esc(m.model_id) + '">Relancer l IA</button>') +
+    '<button class="danger" data-trash="' + esc(m.model_id) +
+      '" data-kind="model">Mettre a la corbeille</button></div>';
+}
+
+/** Inline edit — the repair for a mistyped model number (no re-photographing). */
+function editBlock(m){
+  if (m.corbeille) return '';
+  const f = (n, label, v) => '<div><label>' + label + '</label>' +
+    '<input name="' + n + '" value="' + esc(v || '') + '"></div>';
+  return '<details class="edit" id="edit-' + esc(m.model_id) + '">' +
+    '<summary>Corriger</summary><div class="grid">' +
+    f('brand', 'Marque', m.brand) +
+    f('mnum', 'Numero de modele', m.model_number_raw || m.model_number) +
+    f('type', 'Type', m.type) +
+    f('name', 'Nom', m.names.fr) +
+    '</div>' +
+    '<label style="margin-top:8px;display:block"><input type="checkbox" name="rq" checked ' +
+    'style="width:auto"> relancer l IA apres correction</label>' +
+    '<div class="acts"><button data-save="' + esc(m.model_id) + '">Enregistrer</button></div>' +
+    '<div class="warn"></div></details>';
+}
+
+function whyBlock(m){
+  let w = null;
+  try { w = JSON.parse(m.ia_meta || 'null'); } catch(e) { return ''; }
+  if (!w || !w.tried) return '';
+  const rows = w.tried.map(t => {
+    const bits = [];
+    if (t.pages != null) bits.push(t.pages + ' p.');
+    if (t.chars != null) bits.push(Math.round(t.chars/1000) + 'k car.');
+    if (t.model_hits != null) bits.push('modele x' + t.model_hits);
+    if (t.instruction_phrases != null) bits.push(t.instruction_phrases + ' phrases d instruction');
+    if (t.status != null) bits.push('HTTP ' + t.status);
+    return '<tr><td>' + esc(t.stage) + '</td>' +
+      '<td><code>' + esc(shortUrl(t.url)) + '</code></td>' +
+      '<td>' + esc(t.verdict || '-') + '</td>' +
+      '<td>' + esc((t.reasons||[]).join('; ')) + '<br><span class="muted">' +
+      esc(bits.join(' - ')) + '</span></td></tr>';
+  }).join('');
+  const cands = w.considered.map(c =>
+    '<tr><td>' + c.score + '</td><td><code>' +
+    esc(shortUrl(c.url)) + '</code></td>' +
+    '<td colspan="2">' + esc((c.reasons||[]).join('; ')) + '</td></tr>').join('');
+  return '<details class="why"><summary>Pourquoi aucun mode d emploi ? (' +
+    w.tried.length + ' document(s) essaye(s))</summary>' +
+    '<div class="wrap"><table>' +
+    '<tr><th colspan="4">Documents telecharges et examines</th></tr>' +
+    '<tr><th>etape</th><th>url</th><th>verdict</th><th>raison</th></tr>' + rows +
+    '<tr><th colspan="4">Candidats classes (non telecharges)</th></tr>' + cands +
+    '</table></div></details>';
 }
 
 async function load(){
@@ -132,7 +274,8 @@ async function load(){
   }
   const d = await r.json();
   document.getElementById('counts').textContent =
-    d.counts.models + ' modèle(s) · ' + d.counts.units + ' exemplaire(s)';
+    d.counts.models + ' modele(s) - ' + d.counts.units + ' exemplaire(s)' +
+    (d.counts.corbeille ? ' - ' + d.counts.corbeille + ' dans la corbeille' : '');
 
   const byModel = {};
   for (const u of d.units) (byModel[u.model_id] ||= []).push(u);
@@ -144,7 +287,7 @@ async function load(){
   for (const m of d.models){
     const us = byModel[m.model_id] || [];
     const st = stockBy[m.model_id];
-    h += '<div class="card">' +
+    h += '<div class="card' + (m.corbeille ? ' gone' : '') + '">' +
       '<div class="thumbs">' + img(m.photo, m.model_id) +
         (m.photo_plaque ? img(m.photo_plaque, 'plaque') : '') + '</div>' +
       '<div class="body">' +
@@ -158,14 +301,18 @@ async function load(){
           ' · ' + esc(m.created_by) + ' le ' + esc((m.created_at||'').slice(0,16).replace('T',' ')) +
         '</div>' +
         tagsFor(m) +
-        (m.manual_state === 'sans_objet' ? '' :
-          '<div class="tags"><button class="mini" data-requeue="' +
-          esc(m.model_id) + '">Relancer pour ce mod\u00e8le</button></div>') +
+        editBlock(m) +
+        actionRow(m) +
         (us.length ? '<div class="units">Exemplaires : ' +
-           us.map(u => '<span>' + esc(u.unit_id) + (u.emplacement ? ' · ' + esc(u.emplacement) : '') +
-                       '</span>').join('') + '</div>' : '') +
+           us.map(u => '<span' + (u.corbeille ? ' style="text-decoration:line-through;opacity:.6"' : '') +
+             '>' + esc(u.unit_id) + (u.emplacement ? ' - ' + esc(u.emplacement) : '') +
+             (m.corbeille ? '' :
+               ' <button class="mini" data-' + (u.corbeille ? 'restore' : 'trash') + '="' +
+               esc(u.unit_id) + '" data-kind="unit">' + (u.corbeille ? 'x' : 'annuler') +
+               '</button>') + '</span>').join('') + '</div>' : '') +
         (st ? '<div class="units">Stock : <code>' + esc(st.quantites) + '</code> ' +
               esc(st.unite_mesure) + '</div>' : '') +
+        whyBlock(m) +
       '</div></div>';
   }
 

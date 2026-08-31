@@ -221,11 +221,11 @@ export async function recentHandler(env) {
  * the admin page in a later phase. Everything here is SELECT only.
  */
 export async function inspectHandler(env) {
-  const [models, units, stock, journal] = await Promise.all([
+  const [models, units, stock, journal, corbeille] = await Promise.all([
     env.DB.prepare(
       `SELECT model_id,type,brand,model_number,model_number_raw,category,suivi,
               consommable,photo,photo_plaque,names,manual_state,danger_eleve,
-              approbation,epi_confirme,ia_etat,ia_tentatives,ia_erreur,
+              approbation,epi_confirme,ia_etat,ia_tentatives,ia_erreur,ia_meta,
               created_at,created_by
          FROM models ORDER BY created_at DESC`).all(),
     env.DB.prepare(
@@ -236,12 +236,24 @@ export async function inspectHandler(env) {
     env.DB.prepare(
       `SELECT at,model_id,etape,ok,detail FROM journal
         ORDER BY at DESC LIMIT 100`).all(),
+    env.DB.prepare(`SELECT kind,id,at,par,raison FROM corbeille`).all(),
   ]);
-  const M = (models.results || []).map(r => ({ ...r, names: JSON.parse(r.names || '{}') }));
+  const binned = { model: new Set(), unit: new Set() };
+  for (const r of corbeille.results || []) binned[r.kind]?.add(r.id);
+  // Cancelled rows stay in the response, flagged — the corbeille has to be
+  // visible to be emptied, and an item that vanishes silently is the thing
+  // people distrust.
+  const M = (models.results || []).map(r => ({
+    ...r, names: JSON.parse(r.names || '{}'), corbeille: binned.model.has(r.model_id) }));
+  const U = (units.results || []).map(r => ({
+    ...r, corbeille: binned.unit.has(r.unit_id) || binned.model.has(r.model_id) }));
   return json({
-    counts: { models: M.length, units: (units.results || []).length },
+    counts: { models: M.filter(m => !m.corbeille).length,
+              units: U.filter(u => !u.corbeille).length,
+              corbeille: (corbeille.results || []).length },
+    corbeille: corbeille.results || [],
     models: M,
-    units: units.results || [],
+    units: U,
     stock: stock.results || [],
     journal: journal.results || [],
   });
@@ -304,4 +316,172 @@ export async function requeueHandler(request, env, who) {
   }
   if (!out.length) return json({ ok: true, note: 'nothing was waiting', queued: 0 });
   return json({ ok: true, queued: out.filter(o => o.queued).length, models: out });
+}
+
+/* ===========================================================================
+ * Corbeille — cancel, restore, purge, edit.
+ *
+ * Two rules from the frozen data model shape all of this:
+ *
+ *  1. UNIT IDS ARE NEVER REUSED, even after scrapping — the number may be
+ *     written on something physical. So cancelling a unit hides it and keeps
+ *     its number retired. The counter is never rolled back, by anyone, ever.
+ *  2. A MODEL IS A DESCRIPTION, not a thing. No M-0007 is painted on a
+ *     machine, so a model captured wrongly can genuinely go.
+ *
+ * Deletion is two deliberate steps: cancel, then purge. That matters because
+ * the people using this are not the people who built it.
+ * ========================================================================= */
+
+const KINDS = ['unit', 'model'];
+
+export async function trashHandler(request, env, who) {
+  const { kind, id, raison } = await request.json();
+  if (!KINDS.includes(kind) || !id) return json({ error: 'kind and id required' }, 400);
+  await env.DB.prepare(
+    `INSERT INTO corbeille (kind,id,at,par,raison) VALUES (?,?,?,?,?)
+     ON CONFLICT(kind,id) DO UPDATE SET at=excluded.at, par=excluded.par`
+  ).bind(kind, id, now(), who, (raison || '').slice(0, 200)).run();
+  await env.DB.prepare(
+    `INSERT INTO journal (at,model_id,etape,ok,detail) VALUES (?,?,?,1,?)`
+  ).bind(now(), kind === 'model' ? id : null, 'corbeille_ajout',
+         JSON.stringify({ kind, id, by: who })).run();
+  return json({ ok: true, kind, id, state: 'dans la corbeille' });
+}
+
+export async function restoreHandler(request, env, who) {
+  const { kind, id } = await request.json();
+  if (!KINDS.includes(kind) || !id) return json({ error: 'kind and id required' }, 400);
+  await env.DB.prepare(`DELETE FROM corbeille WHERE kind=? AND id=?`).bind(kind, id).run();
+  await env.DB.prepare(
+    `INSERT INTO journal (at,model_id,etape,ok,detail) VALUES (?,?,?,1,?)`
+  ).bind(now(), kind === 'model' ? id : null, 'corbeille_restaure',
+         JSON.stringify({ kind, id, by: who })).run();
+  return json({ ok: true, kind, id, state: 'restauré' });
+}
+
+/** R2 keys are deleted with the rows. An orphaned photo is a slow leak. */
+async function deletePhotos(env, keys) {
+  for (const k of keys.filter(Boolean)) {
+    try { await env.PHOTOS.delete(k); } catch { /* already gone */ }
+  }
+}
+
+export async function purgeHandler(request, env, who) {
+  const rows = await env.DB.prepare(`SELECT kind, id FROM corbeille`).all();
+  const done = { units: 0, models: 0, photos: 0 };
+
+  for (const r of (rows.results || []).filter(x => x.kind === 'unit')) {
+    const u = await env.DB.prepare(
+      `SELECT photo FROM units WHERE unit_id=?`).bind(r.id).first();
+    if (u) { await deletePhotos(env, [u.photo]); done.photos++; }
+    await env.DB.prepare(`DELETE FROM units WHERE unit_id=?`).bind(r.id).run();
+    done.units++;
+  }
+
+  for (const r of (rows.results || []).filter(x => x.kind === 'model')) {
+    const m = await env.DB.prepare(
+      `SELECT photo, photo_plaque FROM models WHERE model_id=?`).bind(r.id).first();
+    const us = await env.DB.prepare(
+      `SELECT unit_id, photo FROM units WHERE model_id=?`).bind(r.id).all();
+    await deletePhotos(env, [
+      m?.photo, m?.photo_plaque,
+      ...(us.results || []).map(x => x.photo),
+      `manuals/${r.id}.md`,          // the parked manual text
+    ]);
+    await env.DB.prepare(`DELETE FROM units WHERE model_id=?`).bind(r.id).run();
+    await env.DB.prepare(`DELETE FROM stock WHERE model_id=?`).bind(r.id).run();
+    await env.DB.prepare(`DELETE FROM models WHERE model_id=?`).bind(r.id).run();
+    done.models++;
+    done.units += (us.results || []).length;
+  }
+
+  await env.DB.prepare(`DELETE FROM corbeille`).run();
+  // The journal is NOT cleared. What was removed, and by whom, survives the
+  // removal — otherwise the audit trail has a hole exactly where it matters.
+  await env.DB.prepare(
+    `INSERT INTO journal (at,model_id,etape,ok,detail) VALUES (?,?,?,1,?)`
+  ).bind(now(), null, 'corbeille_videe', JSON.stringify({ ...done, by: who })).run();
+  return json({ ok: true, purged: done });
+}
+
+/**
+ * Edit a model's identifying fields.
+ *
+ * This is the repair for the one problem normalisation cannot solve: a
+ * mistyped digit. GA530R and GA5030R are different strings by every rule we
+ * have, so they become two models and no amount of canonicalisation merges
+ * them. Fixing the text and re-queuing is the fix.
+ */
+export async function editModelHandler(request, env, who) {
+  const b = await request.json();
+  const id = b.model_id;
+  if (!id) return json({ error: 'model_id required' }, 400);
+  const m = await env.DB.prepare(
+    `SELECT * FROM models WHERE model_id=?`).bind(id).first();
+  if (!m) return json({ error: 'unknown model' }, 404);
+
+  const warnings = [];
+  const sets = [], args = [];
+
+  if (b.brand !== undefined) { sets.push('brand=?'); args.push(b.brand || null); }
+
+  if (b.model_number !== undefined) {
+    const norm = normaliseModelNumber(b.model_number);
+    const key = canonicalKey(b.model_number);
+    if (key) {
+      const clash = await env.DB.prepare(
+        `SELECT model_id FROM models WHERE UPPER(brand)=? AND ${CANON_SQL}=? AND model_id<>?`
+      ).bind((b.brand ?? m.brand ?? '').trim().toUpperCase(), key, id).first();
+      if (clash) warnings.push(
+        `${clash.model_id} already uses this brand and model number — you now have two ` +
+        `records for the same machine. Move the units across, then cancel the empty one.`);
+    }
+    sets.push('model_number=?', 'model_number_raw=?');
+    args.push(norm, String(b.model_number).trim());
+  }
+
+  if (b.type !== undefined) {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(b.type))
+      return json({ error: 'type must be UPPERCASE ASCII' }, 400);
+    const us = await env.DB.prepare(
+      `SELECT unit_id FROM units WHERE model_id=?`).bind(id).all();
+    const stale = (us.results || []).filter(u => !u.unit_id.startsWith(b.type + '-'));
+    if (stale.length) warnings.push(
+      `${stale.length} existing unit ID(s) keep the old prefix (${stale.map(u => u.unit_id).join(', ')}). ` +
+      `IDs are never rewritten — the number may already be on a label.`);
+    sets.push('type=?'); args.push(b.type);
+  }
+
+  if (b.name !== undefined) {
+    const names = JSON.parse(m.names || '{}');
+    if (b.name) names.fr = b.name; else delete names.fr;
+    sets.push('names=?'); args.push(JSON.stringify(names));
+  }
+  if (b.category !== undefined) { sets.push('category=?'); args.push(b.category); }
+  if (b.danger_eleve !== undefined) { sets.push('danger_eleve=?'); args.push(b.danger_eleve ? 1 : 0); }
+
+  if (!sets.length) return json({ error: 'nothing to change' }, 400);
+  sets.push('updated_at=?', 'updated_by=?'); args.push(now(), who);
+
+  await env.DB.prepare(`UPDATE models SET ${sets.join(', ')} WHERE model_id=?`)
+    .bind(...args, id).run();
+
+  let requeued = false;
+  if (b.requeue && m.manual_state !== 'sans_objet') {
+    await env.DB.prepare(
+      `UPDATE models SET ia_etat='pending', ia_tentatives=0, ia_erreur=NULL, ia_meta='{}',
+              manual_state=CASE WHEN manual_state='introuvable' THEN 'a_rediger'
+                                ELSE manual_state END
+        WHERE model_id=?`).bind(id).run();
+    await env.JOBS.send({ type: 'source', model_id: id, reason: 'edited' });
+    requeued = true;
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO journal (at,model_id,etape,ok,detail) VALUES (?,?,?,1,?)`
+  ).bind(now(), id, 'modele_modifie',
+         JSON.stringify({ by: who, champs: Object.keys(b).filter(k => k !== 'model_id'),
+                          warnings, requeued })).run();
+  return json({ ok: true, model_id: id, warnings, requeued });
 }

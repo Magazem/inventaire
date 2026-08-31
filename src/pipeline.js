@@ -64,13 +64,30 @@ export async function jobSource(env, { model_id }) {
   const acq = await acquireManual(env, m.brand, m.model_number, canon);
 
   if (!acq.accepted) {
+    // Keep the EVIDENCE, not just the verdict. "None qualified" is not a
+    // diagnosis — it could mean the search found nothing, or that the right
+    // manual was found and wrongly refused. Those need opposite fixes, and
+    // without the per-candidate reasons there is no way to tell them apart
+    // after the fact.
+    const why = {
+      outcome: acq.outcome,
+      at: now(),
+      considered: (acq.ranked || []).slice(0, 6).map(c => ({
+        url: c.url, score: c.score, title: c.title || null,
+        reasons: c.reasons })),
+      tried: (acq.attempts || []).map(a => ({
+        stage: a.stage, url: a.url, verdict: a.verdict || null,
+        reasons: a.reasons || null, pages: a.pages ?? null,
+        chars: a.chars ?? null, model_hits: a.model_hits ?? null,
+        instruction_phrases: a.instruction_phrases ?? null,
+        status: a.status ?? null, links: a.links ?? null })),
+    };
     await env.DB.prepare(
       `UPDATE models SET manual_state='introuvable', ia_etat='done',
-              ia_derniere=?, ia_erreur=?, updated_at=? WHERE model_id=?`
-    ).bind(now(), acq.outcome, now(), model_id).run();
-    await journal(env, model_id, 'source_introuvable', false,
-                  { outcome: acq.outcome, tried: acq.attempts?.length ?? 0 });
-    return { ok: true, state: 'introuvable' };
+              ia_derniere=?, ia_erreur=?, ia_meta=?, updated_at=? WHERE model_id=?`
+    ).bind(now(), acq.outcome, JSON.stringify(why), now(), model_id).run();
+    await journal(env, model_id, 'source_introuvable', false, why);
+    return { ok: true, state: 'introuvable', why };
   }
 
   const md = await fetchMarkdown(env, acq.accepted.url);

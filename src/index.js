@@ -12,7 +12,8 @@ import { runJob } from './pipeline.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
 import { listsHandler, lookupHandler, photoHandler, createItemHandler,
          recentHandler, inspectHandler, photoGetHandler,
-         requeueHandler } from './api.js';
+         requeueHandler, trashHandler, restoreHandler,
+         purgeHandler, editModelHandler } from './api.js';
 
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -54,6 +55,14 @@ export default {
       if (p === '/api/photo') return photoGetHandler(request, env);
       if (p === '/api/requeue' && request.method === 'POST')
         return requeueHandler(request, env, who);
+      if (p === '/api/trash' && request.method === 'POST')
+        return trashHandler(request, env, who);
+      if (p === '/api/restore' && request.method === 'POST')
+        return restoreHandler(request, env, who);
+      if (p === '/api/purge' && request.method === 'POST')
+        return purgeHandler(request, env, who);
+      if (p === '/api/models/edit' && request.method === 'POST')
+        return editModelHandler(request, env, who);
       // P1.2 probe — session-gated because it fetches an arbitrary URL.
       if (p === '/api/probe/pdf') return probePdfHandler(request, env);
       if (p === '/api/probe/source') return probeSourceHandler(request, env);

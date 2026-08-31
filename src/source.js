@@ -334,16 +334,65 @@ const INSTRUCTION_PHRASES = [
   'istruzioni di sicurezza', 'avvertenza',
   'instruções de segurança', 'instrucciones de seguridad',
 ];
+
+/** Accent-insensitive so "sécurité" matches a phrase written "securite". */
+const flat = s => (s || '').toLowerCase().normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '').replace(/['’]/g, ' ').replace(/\s+/g, ' ');
 const SALES_PHRASES = ['rrp', 'recommended retail', 'prix conseillé', 'incl. vat',
   'order now', 'our range', 'new for 20', 'find your dealer', 'promotion'];
 
-export function qualifyManual(md, canonModel) {
+/**
+ * Parts catalogues and exploded views.
+ *
+ * The Honda run's top candidate was
+ * `.../pieces-detachees/Honda/Tondeuse/HRH536K4/vue-eclatee-HRH536K4-QXEH-A.pdf`
+ * — 26 pages naming the model 29 times, with one instruction phrase in the
+ * whole document. It was refused, correctly, but only because it was thin
+ * on instructions. It should be refused for what it IS: a parts diagram is
+ * not a weak manual, it is a different kind of document.
+ */
+const PARTS_WORDS = [
+  'vue eclatee', 'vue éclatée', 'pieces detachees', 'pièces détachées',
+  'exploded view', 'parts list', 'parts catalog', 'parts catalogue',
+  'illustrated part', 'spare parts', 'ersatzteil', 'explosionszeichnung',
+  'lista ricambi', 'despiece', 'catalogo de pecas', 'part number index',
+];
+
+/**
+ * How a French mower manual actually talks.
+ *
+ * A genuine 63-page Honda owner's manual matched exactly ONE instruction
+ * phrase, because the list was written from power-tool language. If its
+ * model number had matched, a real manual would have been thrown out. The
+ * additions below are all multi-word, so they do not fire on catalogues.
+ */
+const EXTRA_INSTRUCTION_PHRASES = [
+  'consignes de securite', 'precautions de securite', 'regles de securite',
+  'avant chaque utilisation', 'avant de demarrer', 'arreter le moteur',
+  'entretien periodique', 'porter des lunettes', 'porter des gants',
+  'securite de fonctionnement', 'notice originale',
+  'safety precautions', 'safety rules', 'before starting the engine',
+  'stop the engine', 'periodic maintenance', 'operating safety',
+  'original instructions', 'read this manual',
+  'sicherheitsvorschriften', 'vor der inbetriebnahme', 'motor abstellen',
+  'norme di sicurezza', 'prima dell uso',
+  'normas de seguranca', 'antes de utilizar',
+  'normas de seguridad', 'antes de usar',
+];
+
+export function qualifyManual(md, canonModel, url = '') {
   const lower = md.toLowerCase();
+  const flatText = flat(md.slice(0, 200_000));
+  const flatUrl = flat(url);
   const canonText = md.toUpperCase().replace(/[^A-Z0-9]/g, '');
   const modelHits = canonModel
     ? (canonText.split(canonModel).length - 1) : 0;
 
-  const instruction = INSTRUCTION_PHRASES.filter(p => lower.includes(p));
+  const instruction = [
+    ...INSTRUCTION_PHRASES.filter(p => lower.includes(p)),
+    ...EXTRA_INSTRUCTION_PHRASES.filter(p => flatText.includes(flat(p))),
+  ];
+  const parts = PARTS_WORDS.filter(p => flatUrl.includes(flat(p)) || flatText.includes(flat(p)));
   const sales = SALES_PHRASES.filter(p => lower.includes(p));
   const map = pageLanguageMap(md);
   const pages = map.total_pages || 0;
@@ -355,6 +404,11 @@ export function qualifyManual(md, canonModel) {
   const reasons = [];
   let verdict = 'manual';
   if (modelHits === 0) { verdict = 'reject'; reasons.push('the model number never appears in the text'); }
+  // A parts diagram names the model constantly and instructs on nothing.
+  if (parts.length && instruction.length < 6) {
+    verdict = 'reject';
+    reasons.push(`parts catalogue / exploded view (${parts.slice(0, 2).join(', ')})`);
+  }
   if (instruction.length < 3) { verdict = 'reject'; reasons.push(`only ${instruction.length} instruction phrases`); }
   if (md.length < 8000) { verdict = 'reject'; reasons.push('too short to be a manual'); }
   if (sales.length >= 2 && instruction.length < 6) {
@@ -367,6 +421,8 @@ export function qualifyManual(md, canonModel) {
   }
   return {
     verdict, reasons,
+    parts_signals: parts,
+    instruction_matched: instruction.slice(0, 6),
     structure: (map.coverage || 0) >= 0.3
       ? 'multilingual, page-labelled' : 'single-language (or unlabelled)',
     document_language: detected,
@@ -432,12 +488,14 @@ export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = 
       continue;
     }
 
-    const q = qualifyManual(md, canonModel);
+    const q = qualifyManual(md, canonModel, c.url);
     attempts.push({ stage: 'qualify', url: c.url, score: c.score, via: c.via,
                     provenance: c.provenance,
                     verdict: q.verdict, reasons: q.reasons,
                     model_hits: q.model_hits, pages: q.pages, chars: q.chars,
                     instruction_phrases: q.instruction_phrases,
+                    instruction_matched: q.instruction_matched,
+                    parts_signals: q.parts_signals,
                     structure: q.structure,
                     document_language: q.document_language?.language,
                     languages: Object.keys(q.language_map.languages || {}) });

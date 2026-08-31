@@ -198,3 +198,23 @@ INSERT OR IGNORE INTO epi (id,noms,picto,genre) VALUES
  ('electrique','{"fr":"Risque électrique","en":"Electrical hazard","ar":"خطر كهربائي","ti":"ሓደጋ ኤለክትሪክ"}','pictos/W012.svg','danger');
 
 INSERT OR IGNORE INTO counters (scope,next) VALUES ('MODEL',1);
+
+-- ---------------------------------------------------------------------------
+-- corbeille — reversible deletion.
+--
+-- A separate TABLE rather than a column on models/units, for one practical
+-- reason: schema.sql is applied on every deploy, and `ALTER TABLE ... ADD
+-- COLUMN` is not idempotent — the second deploy would fail. CREATE TABLE IF
+-- NOT EXISTS is.
+--
+-- It doubles as the audit record: who cancelled what, when, and why.
+-- Membership means "hidden everywhere"; purging is a separate, deliberate act.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS corbeille (
+  kind    TEXT NOT NULL CHECK (kind IN ('unit','model')),
+  id      TEXT NOT NULL,
+  at      TEXT NOT NULL,
+  par     TEXT,
+  raison  TEXT,
+  PRIMARY KEY (kind, id)
+);
