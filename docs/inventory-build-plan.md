@@ -339,6 +339,74 @@ a browser may not be what the server sent.**
 
 ---
 
+### P1.2 PROBE RUN #3 — 31 Aug 2026: stage 2 CLOSED, sourcing built
+
+Probe v3 against the Makita original. **The page-header map works exactly as
+designed.**
+
+```
+136 pages, 129 labelled, coverage 0.95, 10 languages, ALL contiguous
+en  p7-18    chars      0 –  41 525
+fr  p19-31   chars 41 525 –  90 455     <- adjacent, no gap, no overlap
+de  p32-45   chars 90 455 – 137 789
+it  p46-58     nl p59-71    es p72-84
+pt  p85-97     da p98-109   el p110-123   tr p124-135
+```
+
+The seven unlabelled pages are the cover and the figure plates
+(`Fig.1 … Fig.15`) — correctly excluded rather than mis-assigned.
+
+**The number that matters: the French guide needs 48 930 characters, not
+462 025.** Roughly **12 000 tokens instead of 115 506** — a 90% cut, and the
+model reads only French to write French, which is what D43 asked for.
+
+**The fallback is measurably worse**, as it should be: it placed `it` at
+20–35% (truth 29.8–40.8%) and `de` at 10–30% (truth 19.6–29.8%). Good enough
+to rescue an unlabelled document, not good enough to lead. D54 confirmed.
+
+**Gap found: this manual carries no Arabic.** Ten languages, none of them
+`ar`. P0.3's Bosch finding does not generalise — Makita items get
+*translated* Arabic, not native. The trust tier already handles it honestly,
+but the Arabic review load is real rather than theoretical.
+
+**Also confirmed: the browser was translating run #2.** With auto-translate
+off, `en` and `de` come back correct, and `middle_400` now reads
+`70 NEDERLANDS` where it previously read `70 DUTCH`. The language table
+happens to accept both spellings, so it would have worked regardless — but
+that was luck, not design.
+
+---
+
+### Stage 1 built — `src/source.js`
+
+Ordered by what runs #1 and #2 proved, not by preference:
+
+1. **Verified manufacturer URL rule** where P0.3 found one. Makita's is now
+   proven end to end. Only Makita's is a pure model-number substitution; the
+   others key on article numbers or market-specific slugs we do not hold, so
+   they fall through to search (D46).
+2. **Serper search, ranked by domain**, +60 manufacturer / −45 aggregator /
+   +30 `.pdf` / +20 model in URL / −20 shop listing. Every score carries its
+   reasons so a bad pick can be diagnosed without re-running.
+3. **Ranged 1 KB `%PDF` check** on the top three before committing to a
+   21 MB fetch.
+
+Ranking unit-tested against the *actual* DWE492 search results — the ones
+that were aggregators for the whole first page:
+
+```
+ 120  service.dewalt.co.uk/.../DWE492_GB.pdf   manufacturer, .pdf, model in URL
+  60  dewalt.co.uk/product/dwe492-qs           manufacturer, but a shop page
+   5  free-instruction-manuals.com/...pdf      aggregator
+ -15  manualslib.com/manual/3513190            aggregator
+ -50  device.report/manual/3950355             aggregator, WRONG MODEL (DWE490)
+```
+
+Unranked search picks row 4. That is precisely how probe run #1 ended up
+writing from a ManualsLib reprint of the wrong grinder.
+
+---
+
 ## P1 — Foundations
 
 **Entry:** ✔ all clear. P0.1 closed, P0.2 passed (bar Tigrinya), P0.3 done, 1.1 frozen. **Nothing blocks P1.2.**

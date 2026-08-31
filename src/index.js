@@ -5,6 +5,7 @@
 import { capturePage } from './capture-page.js';
 import { inspectPage } from './inspect-page.js';
 import { probePdfHandler } from './probe.js';
+import { probeSourceHandler } from './source.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
 import { listsHandler, lookupHandler, photoHandler, createItemHandler,
          recentHandler, inspectHandler, photoGetHandler } from './api.js';
@@ -49,6 +50,7 @@ export default {
       if (p === '/api/photo') return photoGetHandler(request, env);
       // P1.2 probe — session-gated because it fetches an arbitrary URL.
       if (p === '/api/probe/pdf') return probePdfHandler(request, env);
+      if (p === '/api/probe/source') return probeSourceHandler(request, env);
       if (p === '/api/models/lookup' && request.method === 'POST')
         return lookupHandler(request, env);
       if (p === '/api/photos' && request.method === 'POST')
