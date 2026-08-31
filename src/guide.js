@@ -28,6 +28,32 @@ export const DANGER_IDS = ['projection', 'bruit', 'surface_chaude',
   'pieces_mobiles', 'electrique'];
 
 /**
+ * What each id MEANS.
+ *
+ * Run #8's PPE call returned `casque` (hard hat) and `chaussures` for an
+ * angle grinder, and missed `projection` and `bruit` entirely — while the
+ * guide it wrote from the same text said to wear eye and hearing
+ * protection. The cause was not the model: the enum handed it bare ids and
+ * never said what they meant. `casque` vs `casque_antibruit` is a coin flip
+ * from the identifier alone.
+ */
+export const ID_MEANINGS = {
+  gants: 'protective gloves (only if the text requires gloves — note that some manuals FORBID cloth gloves)',
+  lunettes: 'safety glasses / eye protection',
+  casque_antibruit: 'hearing protection, ear defenders, ear plugs',
+  casque: 'hard hat, helmet — head protection against falling objects ONLY',
+  chaussures: 'safety footwear, steel-toe boots',
+  masque: 'dust mask, respirator, breathing protection',
+  gilet: 'high-visibility vest',
+  visiere: 'face shield, full-face visor (more than glasses)',
+  projection: 'HAZARD: flying particles, sparks, fragments, debris thrown from the work',
+  bruit: 'HAZARD: loud noise, high sound level',
+  surface_chaude: 'HAZARD: hot surface, parts that stay hot after use, burn risk',
+  pieces_mobiles: 'HAZARD: moving parts, rotating disc or blade, entanglement',
+  electrique: 'HAZARD: electric shock, mains voltage, damaged cable',
+};
+
+/**
  * The guide schema. Constrained decoding means anything expressible here is
  * structurally impossible to get wrong (D52) — so express as much as we can.
  *
@@ -40,8 +66,12 @@ export const DANGER_IDS = ['projection', 'bruit', 'surface_chaude',
  * constrained-decoding support is least certain.
  */
 function guideSchema() {
-  const section = { type: 'array', maxItems: 12,
-                    items: { type: 'string', maxLength: 400 } };
+  // NO maxLength here, deliberately. Run #8 ended a safety instruction as
+  // "Ne déposez jamais l'outil avant l" — constrained decoding does not
+  // REJECT an over-long string, it CUTS it. A schema length limit therefore
+  // manufactures broken sentences instead of triggering a retry. Length is
+  // checked in code (Layer 3) where it can fail properly.
+  const section = { type: 'array', maxItems: 20, items: { type: 'string' } };
   const props = {};
   for (const k of SECTIONS) props[k] = section;
   return {
@@ -60,8 +90,12 @@ function ppeSchema() {
       type: 'object', additionalProperties: false,
       required: ['epi', 'dangers', 'source'],
       properties: {
-        epi:     { type: 'array', maxItems: 8, items: { enum: EPI_IDS } },
-        dangers: { type: 'array', maxItems: 5, items: { enum: DANGER_IDS } },
+        // uniqueItems because run #8 returned casque twice, masque twice and
+        // pieces_mobiles five times. An enum constrains VALUES, not repetition.
+        epi:     { type: 'array', maxItems: 8, uniqueItems: true,
+                   items: { enum: EPI_IDS } },
+        dangers: { type: 'array', maxItems: 5, uniqueItems: true,
+                   items: { enum: DANGER_IDS } },
         source:  { enum: ['manual', 'not_specified'] },
       },
     },
@@ -190,8 +224,15 @@ export function validateGuide(lang, sections) {
   if (!filled.includes('securite')) problems.push('securite is empty');
   const script = checkScript(lang, sections);
   if (!script.ok) problems.push(`script check failed: ${script.reason}`);
-  const tooLong = SECTIONS.flatMap(k => sections[k] || []).filter(s => s.length > 400);
+  const all = SECTIONS.flatMap(k => sections[k] || []);
+  const tooLong = all.filter(s => s.length > 400);
   if (tooLong.length) problems.push(`${tooLong.length} item(s) over 400 chars`);
+  // A safety instruction that stops mid-sentence is worse than a missing
+  // one — it reads as complete. Run #8 produced exactly that.
+  const truncated = all.filter(s => s.length > 120 && !/[.!?:»"')\]]\s*$/.test(s));
+  if (truncated.length)
+    problems.push(`${truncated.length} item(s) appear truncated mid-sentence: ` +
+                  truncated.map(s => '…' + s.slice(-40)).join(' | '));
   return { ok: problems.length === 0, problems, filled, script };
 }
 
@@ -207,9 +248,12 @@ function systemPrompt(lang) {
     `1. Write ONLY in ${name}.`,
     '2. Use ONLY what the supplied text states. Never add knowledge of your own.',
     '3. If the supplied text does not cover a section, return an empty array for it.',
-    '4. Short sentences. One instruction per array item. Assume the reader has',
-    '   never used this machine and does not read technical language well.',
-    '5. Never soften or omit a warning. Never invert a negation.',
+    '4. ONE instruction per array item. Never join two instructions into one',
+    '   item, and never write a paragraph — split it into separate items.',
+    '   Keep each item under 300 characters.',
+    '5. Short sentences. Assume the reader has never used this machine and',
+    '   does not read technical language well.',
+    '6. Never soften or omit a warning. Never invert a negation.',
     '',
     'THE SIX SECTIONS:',
     'usage       — what the machine is for (1-3 items)',
@@ -254,9 +298,19 @@ export async function extractPpe(env, { text, brand, model }) {
     system: [
       'You list the protective equipment and hazards that the supplied manual text requires.',
       '',
-      'Use ONLY ids from the allowed lists. If the text does not state protective',
-      'equipment, return empty arrays and source "not_specified". Never guess from',
-      'the type of machine — only from what the text says.',
+      'WHAT EACH ID MEANS — choose only from these, and only on what the text says:',
+      ...Object.entries(ID_MEANINGS).map(([k, v]) => `  ${k} = ${v}`),
+      '',
+      'RULES:',
+      '1. Each id at most ONCE. Never repeat one.',
+      '2. Include an id only if the text states that protection or hazard.',
+      '   Never infer it from the type of machine.',
+      '3. If the text says NOT to use something (for example cloth gloves),',
+      '   that is not a requirement — do not list it.',
+      '4. If the text requires eye protection, that is `lunettes`, not `casque`.',
+      '   `casque` is a hard hat and is rare on hand tools.',
+      '5. If the text states no protective equipment at all, return empty arrays',
+      '   and source "not_specified".',
     ].join('\n'),
     user: `Machine: ${brand || ''} ${model || ''}\n\nMANUAL TEXT:\n\n${text}`,
     schema: ppeSchema(),
@@ -264,7 +318,11 @@ export async function extractPpe(env, { text, brand, model }) {
     timeoutMs: 45_000,
   });
   if (!call.ok) return call;
-  return { ok: true, epi: call.data.epi || [], dangers: call.data.dangers || [],
+  // Dedupe in code as well. Belt and braces: `uniqueItems` support in
+  // constrained decoding is not something we have proven, and run #8 shows
+  // what it costs when repetition slips through.
+  const uniq = a => [...new Set(Array.isArray(a) ? a : [])];
+  return { ok: true, epi: uniq(call.data.epi), dangers: uniq(call.data.dangers),
            source: call.data.source || 'not_specified', attempts: call.attempts };
 }
 
