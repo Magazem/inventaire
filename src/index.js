@@ -4,6 +4,7 @@
  */
 import { capturePage } from './capture-page.js';
 import { inspectPage } from './inspect-page.js';
+import { probePdfHandler } from './probe.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
 import { listsHandler, lookupHandler, photoHandler, createItemHandler,
          recentHandler, inspectHandler, photoGetHandler } from './api.js';
@@ -46,6 +47,8 @@ export default {
       if (p === '/api/recent') return recentHandler(env);
       if (p === '/api/inspect') return inspectHandler(env);
       if (p === '/api/photo') return photoGetHandler(request, env);
+      // P1.2 probe — session-gated because it fetches an arbitrary URL.
+      if (p === '/api/probe/pdf') return probePdfHandler(request, env);
       if (p === '/api/models/lookup' && request.method === 'POST')
         return lookupHandler(request, env);
       if (p === '/api/photos' && request.method === 'POST')
@@ -114,6 +117,14 @@ async function health(env) {
   out.bindings.longcat_key = { ok: kok, note: kok
     ? `secret readable (${key.length} chars)` : 'not set' };
   if (!kok) out.ok = false;
+
+  out.bindings.ai = { ok: !!env.AI, note: env.AI
+    ? 'binding present (toMarkdown)' : 'no AI binding — PDF text extraction cannot run' };
+
+  const sk = env.SERPER_API_KEY;
+  const sok = typeof sk === 'string' && sk.length > 10;
+  out.bindings.serper_key = { ok: sok, note: sok
+    ? `set (${sk.length} chars)` : 'not set — manual search disabled' };
 
   const pw = env.CAPTURE_PASSWORD;
   const pok = typeof pw === 'string' && pw.length >= 8;

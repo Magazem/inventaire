@@ -16,6 +16,13 @@ bucket_name  = "inventaire-photos"
 jurisdiction = "eu"          # hard EU data-residency boundary, not just a hint.
                              # CLI commands need --jurisdiction eu or they 404.
 
+# ---- Workers AI: PDF -> text only --------------------------------------
+# toMarkdown runs the conversion OFF the Worker. That is the whole point:
+# parsing a 160-page manual in-process would blow through the 10 ms CPU
+# budget of the free plan. No text generation happens here — that is LongCat.
+[ai]
+binding = "AI"
+
 # ---- Queue: AI jobs ----------------------------------------------------
 # Free plan retains messages for 24h only, so the DB is the truth and a
 # daily sweep re-queues anything stranded (design §5.1, data model §3.3).
@@ -39,6 +46,7 @@ SCHEMA_VERSION = "1"
 
 # The LongCat key is a WORKER SECRET, not in this repo and not in CI:
 #   npx wrangler secret put LONGCAT_API_KEY
+#   npx wrangler secret put SERPER_API_KEY
 # (Secrets Store was tried first — nicer hygiene, but its binding refused
 #  authorization at deploy despite correct token permission and workers
 #  scope. A known upstream issue. One key, one consumer: not worth the fight.)
