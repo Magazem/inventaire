@@ -555,6 +555,90 @@ their own pages.
 
 ---
 
+### P1.2 RUNS #8–#9 — 31 Aug 2026: the guide works; the budget was the problem
+
+**Run #8 — first end-to-end pass. Makita GA5030R, French.**
+
+```
+source     icmsmakita.eu (URL rule)      provenance: manufacturer
+slice      pages 19-31, 48 930 chars     method: page_headers
+tier       native                        tier_source: 1, pattern A
+guide      6/6 sections filled           87 s total
+tokens     15 611 prompt / 2 047 completion (1 076 of it reasoning)
+```
+
+The prose is genuinely good and, most importantly, **the negations
+survived**: *"N'utilisez jamais une meule boisseau pour pierre"*,
+*"N'abandonnez jamais l'outil avant que l'accessoire ne se soit complètement
+arrêté"*. That was the single largest risk in the design — P0.2's Tigrinya
+run inverted *"always wear eye protection"* into its opposite. The 15° angle
+and the O/I switch positions are lifted correctly from the manual.
+
+**Three defects, two of them mine.**
+
+**1. A safety instruction was truncated mid-word:** `"Ne déposez jamais
+l'outil avant l"`. It hit `maxLength: 400` in the schema. **Constrained
+decoding does not REJECT an over-long string — it CUTS it.** A schema length
+limit therefore manufactures broken sentences instead of triggering a retry.
+
+=> **D59: never put `maxLength` in a schema whose output is prose.** Length
+belongs in code validation (Layer 3), where it can fail properly. Added with
+it: a truncation detector — a long item not ending in punctuation is a hard
+validation failure, because *a safety instruction that stops mid-sentence is
+worse than a missing one: it reads as complete.*
+
+**2. The PPE call returned `casque` (hard hat) and `chaussures` for an angle
+grinder, and missed `projection` and `bruit`** — while the guide written
+from the same text said to wear eye and hearing protection. Not the model's
+fault: the enum handed it bare ids and never said what they meant.
+`casque` vs `casque_antibruit` is a coin flip from the identifier alone.
+Thirteen definitions added, plus a rule for the trap in Makita's own text —
+the manual says *do not* use cloth gloves, and "do not use X" is not a
+requirement for X.
+
+**3. Duplicates:** `casque` ×2, `masque` ×2, `pieces_mobiles` ×5. An enum
+constrains VALUES, not repetition. `uniqueItems` added, plus a `Set` in code
+because `uniqueItems` support under constrained decoding is unproven.
+
+---
+
+**Run #9 — both calls hit their stops. The stops worked; the budgets did not.**
+
+```
+guide  client_timeout at 60 000 ms       (ran 42 s in run #8)
+ppe    finish_reason "length" at 1 500   reasoning_len 5 694
+       retry at 3 000 -> client_timeout at 45 000 ms
+```
+
+**Nothing hung and nothing vanished** — the response states which stop fired
+at which budget. That is exactly what D50 was written for, and it is the
+first time it has been load-bearing.
+
+The cause is a direct consequence of fixing defect 2. **A richer prompt makes
+a reasoning model think MORE.** Thirteen definitions and five rules produced
+5 694 characters of reasoning against a 1 500-token budget — and reasoning is
+generated before the constrained output, out of the same allowance.
+
+=> **D60: `max_tokens` is a REASONING budget, not an output budget.** Sizing
+it from the expected answer is wrong by an order of magnitude. Guide 4 000 →
+8 000 (timeout 60 s → 150 s); PPE 1 500 → 5 000 (45 s → 90 s).
+
+=> **D61: PPE is extracted from the GUIDE, not from the raw manual.** It was
+reading 60 000 characters to emit eight ids. Now it reads the guide's own
+`securite` and `usage` items — a few hundred characters. Beyond speed, the
+better reason is consistency: **the pictograms and the words a worker reads
+now come from the same text.** Deriving them from different bodies of text
+invites the two to disagree, and a worker cannot tell which one is wrong.
+
+**Standing observation across both runs:** the guide call is strong, the PPE
+call is the weak half, and both times the fault was the prompt rather than
+the model. This is why `epi_confirme` defaults to false (D30). If PPE stays
+shaky, the honest position is that AI-suggested equipment is a **draft for
+the workshop colleague to correct** — which is what P2's safety review was
+always for.
+
+---
+
 ## P1 — Foundations
 
 **Entry:** ✔ all clear. P0.1 closed, P0.2 passed (bar Tigrinya), P0.3 done, 1.1 frozen. **Nothing blocks P1.2.**

@@ -272,8 +272,11 @@ export async function writeGuide(env, { text, lang, brand, model }) {
     system: systemPrompt(lang),
     user: `${head}\n\nMANUAL TEXT:\n\n${text}`,
     schema: guideSchema(),
-    maxTokens: 4000,
-    timeoutMs: 60_000,
+    // Sized for REASONING PLUS OUTPUT, not output alone. Run #9 produced
+    // 3 521 characters of reasoning before writing a single guide token —
+    // and a richer prompt makes a reasoning model think MORE, not less.
+    maxTokens: 8000,
+    timeoutMs: 150_000,
   });
   if (!call.ok) return call;
 
@@ -292,7 +295,23 @@ export async function writeGuide(env, { text, lang, brand, model }) {
            usage: call.usage, attempts: call.attempts };
 }
 
-/** PPE as its own narrow call with an enum — invented categories cannot occur. */
+/**
+ * PPE as its own narrow call with an enum — invented categories cannot occur.
+ *
+ * It runs on the GUIDE's own safety text, not on 60 000 characters of raw
+ * manual. Three reasons, in order:
+ *
+ *   1. Run #9 starved on reasoning against a large input and a small budget.
+ *      A few hundred characters in makes this call small and fast.
+ *   2. The pictograms then match the text the worker is actually reading.
+ *      Deriving them from a different body of text than the guide invites
+ *      the two to disagree, and the worker cannot tell which is right.
+ *   3. The guide is already faithful to the source — that is what stage 3
+ *      was validated for.
+ *
+ * A slice of the raw manual is still passed as backup context, capped, in
+ * case the guide's securite section is thin.
+ */
 export async function extractPpe(env, { text, brand, model }) {
   const call = await callWithBudget(env, {
     system: [
@@ -312,10 +331,10 @@ export async function extractPpe(env, { text, brand, model }) {
       '5. If the text states no protective equipment at all, return empty arrays',
       '   and source "not_specified".',
     ].join('\n'),
-    user: `Machine: ${brand || ''} ${model || ''}\n\nMANUAL TEXT:\n\n${text}`,
+    user: `Machine: ${brand || ''} ${model || ''}\n\nSAFETY TEXT:\n\n${text}`,
     schema: ppeSchema(),
-    maxTokens: 1500,
-    timeoutMs: 45_000,
+    maxTokens: 5000,
+    timeoutMs: 90_000,
   });
   if (!call.ok) return call;
   // Dedupe in code as well. Belt and braces: `uniqueItems` support in
@@ -376,7 +395,13 @@ export async function probeGuideHandler(request, env, deps) {
                   detected: detectLanguage(md) });
 
   const guide = await writeGuide(env, { text: slice.text, lang, brand, model });
-  const ppe = await extractPpe(env, { text: slice.text.slice(0, 60_000), brand, model });
+
+  // PPE reads the guide's own safety text where we have one, so the
+  // pictograms and the words a worker sees come from the same place.
+  const safetyText = guide.ok
+    ? [...(guide.sections.securite || []), ...(guide.sections.usage || [])].join('\n')
+    : slice.text.slice(0, 8000);
+  const ppe = await extractPpe(env, { text: safetyText, brand, model });
 
   const origin = {
     method: acq.accepted.trust_tier_allowed === 'native' && slice.method === 'page_headers'
