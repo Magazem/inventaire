@@ -72,7 +72,7 @@ export function inspectPage() {
   <span class="counts" id="counts">chargement…</span>
   <span style="flex:1"></span>
   <button onclick="load()">Rafraîchir</button>
-  <button onclick="requeue()">Relancer tout ce qui attend</button>
+  <button id="requeue-all">Relancer tout ce qui attend</button>
   <a href="/capture">→ saisie</a>
 </header>
 <main id="out"><p class="empty">chargement…</p></main>
@@ -102,6 +102,15 @@ function tagsFor(m){
   if (m.ia_erreur) t.push('<span class="tag b">' + esc(m.ia_erreur).slice(0,80) + '</span>');
   return '<div class="tags">' + t.join('') + '</div>';
 }
+
+// Delegated: the cards are rebuilt on every load, so a listener on the
+// container outlives them. It also keeps quotes out of generated markup,
+// which is what broke this page the first time.
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-requeue]');
+  if (b) { requeue(b.getAttribute('data-requeue')); return; }
+  if (e.target.id === 'requeue-all') requeue();
+});
 
 async function requeue(id){
   const q = id ? ('?model_id=' + encodeURIComponent(id)) : '';
@@ -150,8 +159,8 @@ async function load(){
         '</div>' +
         tagsFor(m) +
         (m.manual_state === 'sans_objet' ? '' :
-          '<div class="tags"><button class="mini" onclick="requeue(\'' +
-          esc(m.model_id) + '\')">Relancer l\'IA pour ce modèle</button></div>') +
+          '<div class="tags"><button class="mini" data-requeue="' +
+          esc(m.model_id) + '">Relancer pour ce mod\u00e8le</button></div>') +
         (us.length ? '<div class="units">Exemplaires : ' +
            us.map(u => '<span>' + esc(u.unit_id) + (u.emplacement ? ' · ' + esc(u.emplacement) : '') +
                        '</span>').join('') + '</div>' : '') +
