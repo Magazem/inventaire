@@ -407,6 +407,76 @@ writing from a ManualsLib reprint of the wrong grinder.
 
 ---
 
+### P1.2 PROBE RUN #4 — 31 Aug 2026: a URL cannot tell you what a document is
+
+Three live sourcing tests. Makita hit its verified URL rule and never
+touched Serper — as designed. The other two failed, and the Husqvarna
+failure is the important one.
+
+**Husqvarna 545RXT returned a SALES CATALOGUE as `best`.**
+
+```
+aj-874490.pdf  "Aménagement paysager et gestion des espaces verts 2026"
+   /brand/documents/brochure-and-catalogue/...      16.8 MB, score 75
+```
+
+Manufacturer domain (+60) and a real `.pdf` (+30) outweighed "model number
+absent" (−15). The pipeline would have written a safety guide from a
+marketing brochure — and it would have looked fine doing it.
+
+**Worse: the real manual was present and ranked below it.**
+`device.report/m/168bdb…pdf`, titled *"545FR, 545FX, 545FXT, 545RX, 545RXT,
+545F"* — the genuine Husqvarna document, at −5, sunk by the aggregator
+penalty. Same on DeWalt: `manuals.plus` titled *"Models: DWE490, DWE492,
+DWE492S, DWE493, DWE494"* is the real manual, scored 20, never verified
+because only the top three were checked.
+
+**DeWalt returned `best: null`.** Correct behaviour — refusing beats
+inventing — but DeWalt still has no path.
+
+=> **D55: ranking decides what to TRY; content decides what to ACCEPT.**
+A catalogue and a manual are indistinguishable from the outside. Judging a
+document by its URL was never going to work, and run #4 is the proof. Every
+candidate is now fetched, converted and asked four questions:
+
+1. **Does the text name this model?** A catalogue names hundreds; it names
+   *this* one in passing. Zero mentions is an automatic reject.
+2. **Does it read like instructions?** Safety phrasing in any of six
+   languages, not sales copy. Fewer than three phrases is a reject.
+3. **Is it long enough?** Under 8 000 characters is a spec sheet.
+4. **Sales vocabulary?** *RRP, incl. VAT, our range, find your dealer* —
+   two or more, with little instruction phrasing, is a reject.
+
+A long document that mentions the model only once or twice is `doubtful`,
+not accepted — that is the catalogue signature precisely.
+
+**Scoring changes.** Model number absent is now **−100 and disqualifying**,
+not −15. Catalogue vocabulary (`catalogue`, `brochure`, `RRP`, `promo`,
+`Prospekt`, …) is −70. Verification widened from the top 3 to the top 6, in
+parallel, because run #4's real manual sat at rank four.
+
+=> **D56: follow manufacturer support pages.** `husqvarna.com/uk/support/545rxt/`
+is the *right* page — it simply is not the PDF. Run #4 scored it, verified
+it as HTML, and threw it away, never seeing the manual it links to. Support
+pages are now fetched and their PDF links harvested with a +40 bonus.
+
+**Re-ranked against run #4's actual results:**
+
+```
+HUSQVARNA 545RXT              before  ->  after
+  husqvarna.com/uk/support/545rxt/     30  ->   95  FOLLOW
+  regentlawnmowers ...545RXT-AT.pdf    50  ->   55
+  device.report/...pdf (REAL MANUAL)   -5  ->    5
+  aj-874490.pdf (CATALOGUE)            75  ->  -80
+  Husqvarna-RRP-List-2026.pdf          15  -> -140
+```
+
+The catalogue moved from first place to last. Content checks unit-tested on
+a synthetic manual, catalogue and spec sheet: accepted, rejected, rejected,
+each for the right stated reason.
+
+---
+
 ## P1 — Foundations
 
 **Entry:** ✔ all clear. P0.1 closed, P0.2 passed (bar Tigrinya), P0.3 done, 1.1 frozen. **Nothing blocks P1.2.**

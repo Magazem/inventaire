@@ -15,6 +15,8 @@
  * A reprint is still usable content. It simply can never be `native` (D53).
  */
 
+import { pageLanguageMap } from './probe.js';
+
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 
@@ -71,6 +73,25 @@ const SHOP_WORDS = ['amazon.', 'ebay.', 'aliexpress', 'rs-online', 'conrad.',
   'leroymerlin', 'bauhaus', 'hornbach', 'toolstation', 'screwfix', '/product/',
   '/shop/', '/p/', 'price', 'buy'];
 
+/**
+ * Catalogue / brochure / price-list signals.
+ *
+ * Probe run #4 picked a Husqvarna SALES CATALOGUE as the best candidate for
+ * the 545RXT: manufacturer domain, a real PDF, 16.8 MB — and the URL path
+ * said `/brochure-and-catalogue/` in plain sight. A guide written from a
+ * marketing brochure is worse than no guide, because it would look fine.
+ */
+const CATALOGUE_WORDS = [
+  'catalog', 'catalogue', 'catálogo', 'catalogo', 'katalog', 'brochure',
+  'brochures', 'prospekt', 'pricelist', 'price-list', 'rrp', 'promo',
+  'promotion', 'offres', 'angebot', 'mailer', 'newsletter', 'flyer',
+  'assortiment', 'sortiment', 'range-guide', 'lookbook',
+];
+
+/** A manufacturer support page is not the manual — but it LINKS to it. */
+const SUPPORT_PATHS = ['/support/', '/assistance/', '/beratung/', '/supporto/',
+  '/suporte/', '/service/', '/downloads/', '/manuals/', '/documentation'];
+
 const host = u => { try { return new URL(u).hostname.toLowerCase(); } catch { return ''; } };
 
 /**
@@ -95,18 +116,31 @@ export function scoreCandidate(url, title, brandKey, canonModel) {
 
   if (/\.pdf(\?|$)/i.test(url)) { score += 30; reasons.push('.pdf'); }
 
+  // ---- the model number is not a bonus, it is the point ---------------
+  // Run #4's brochure scored 75 with "model number absent" costing only 15.
+  // A document that never names the model cannot be that model's manual.
+  let named = false;
   if (canonModel) {
     const urlCanon = url.toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (urlCanon.includes(canonModel)) { score += 20; reasons.push('model in URL'); }
-    else if ((title || '').toUpperCase().replace(/[^A-Z0-9]/g, '').includes(canonModel)) {
-      score += 10; reasons.push('model in title');
-    } else { score -= 15; reasons.push('model number absent'); }
+    const titleCanon = (title || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (urlCanon.includes(canonModel)) { score += 25; named = true; reasons.push('model in URL'); }
+    else if (titleCanon.includes(canonModel)) { score += 20; named = true; reasons.push('model in title'); }
+    else { score -= 100; reasons.push('MODEL NUMBER ABSENT — disqualifying'); }
   }
+
+  const cat = CATALOGUE_WORDS.find(w => lower.includes(w));
+  if (cat) { score -= 70; reasons.push(`catalogue/brochure (${cat})`); }
 
   if (MANUAL_WORDS.some(w => lower.includes(w))) { score += 10; reasons.push('manual wording'); }
   if (SHOP_WORDS.some(w => lower.includes(w))) { score -= 20; reasons.push('looks like a shop'); }
 
-  return { score, reasons };
+  // A manufacturer support page for THIS model is the most valuable HTML
+  // there is — not the manual, but the page the manual hangs off.
+  const isSupport = SUPPORT_PATHS.some(sp => url.toLowerCase().includes(sp));
+  const follow = isSupport && named && !/\.pdf(\?|$)/i.test(url);
+  if (follow) reasons.push('manufacturer support page — follow for PDF links');
+
+  return { score, reasons, follow, named };
 }
 
 /** One Serper call. Returns [] rather than throwing — search is a fallback. */
@@ -199,11 +233,14 @@ export async function findManual(env, brandRaw, modelRaw, canonModel) {
     }
     out.candidates.sort((a, b) => b.score - a.score);
 
-    // Verify only the top few — verification costs a request each.
-    for (const c of out.candidates.slice(0, 3)) {
+    // Verify the top few in parallel — 1 KB each, so breadth is cheap and
+    // run #4 showed three was too narrow: the real manual sat at rank four.
+    // Support pages are skipped; they are MEANT to be HTML.
+    const toCheck = out.candidates.filter(c => !c.follow && c.score > -50).slice(0, 6);
+    await Promise.all(toCheck.map(async c => {
       c.verified = await verifyPdf(c.url);
       if (!c.verified.ok) c.score -= 60;
-    }
+    }));
     out.candidates.sort((a, b) => b.score - a.score);
   }
 
@@ -215,6 +252,173 @@ export async function findManual(env, brandRaw, modelRaw, canonModel) {
         : 'candidate original — confirm from PDF metadata after fetch')
     : 'nothing reachable';
   return out;
+}
+
+/**
+ * Follow a manufacturer support page and harvest the PDF links on it.
+ *
+ * `husqvarna.com/uk/support/545rxt/` is the RIGHT page — it simply is not
+ * the PDF. Run #4 scored it, verified it as HTML, and threw it away. The
+ * manual it links to was never seen.
+ */
+export async function followForPdfs(url) {
+  try {
+    const r = await fetch(url, {
+      headers: { 'user-agent': 'Mozilla/5.0 (inventaire manual fetcher)' },
+      redirect: 'follow',
+    });
+    if (!r.ok) return { ok: false, status: r.status, links: [] };
+    const html = (await r.text()).slice(0, 900_000);
+    const found = new Set();
+    // href/src attributes, plus bare URLs in inlined JSON (support pages
+    // routinely deliver their document list as embedded state).
+    const re = /(?:href|src|"url"|"link"|"file")\s*[:=]\s*["']([^"']+?\.pdf(?:\?[^"']*)?)["']/gi;
+    let m;
+    while ((m = re.exec(html)) !== null && found.size < 40) {
+      try { found.add(new URL(m[1], url).href); } catch { /* skip */ }
+    }
+    return { ok: true, links: [...found] };
+  } catch (e) { return { ok: false, error: String(e), links: [] }; }
+}
+
+/**
+ * THE DECIDING CHECK — is this document actually a manual for this model?
+ *
+ * Everything before this point judges a document by its URL, and run #4
+ * proved that cannot work: a catalogue and a manual are indistinguishable
+ * from the outside. So ranking now only decides what to TRY. The content
+ * decides what to ACCEPT.
+ *
+ * Four questions, in order of how decisive they are:
+ *   1. Does the text name this model?      A catalogue names hundreds.
+ *   2. Does it read like instructions?     Safety phrasing, not sales copy.
+ *   3. Is it long enough to be a manual?
+ *   4. Does it have language sections?     Then we can slice it (D54).
+ */
+const INSTRUCTION_PHRASES = [
+  'safety instructions', 'safety warnings', 'intended use', 'warning',
+  'caution', 'personal protective equipment', 'before use', 'maintenance',
+  'consignes de sécurité', 'avertissement', 'utilisation conforme',
+  'sicherheitshinweise', 'warnung', 'bestimmungsgemäße',
+  'istruzioni di sicurezza', 'avvertenza',
+  'instruções de segurança', 'instrucciones de seguridad',
+];
+const SALES_PHRASES = ['rrp', 'recommended retail', 'prix conseillé', 'incl. vat',
+  'order now', 'our range', 'new for 20', 'find your dealer', 'promotion'];
+
+export function qualifyManual(md, canonModel) {
+  const lower = md.toLowerCase();
+  const canonText = md.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const modelHits = canonModel
+    ? (canonText.split(canonModel).length - 1) : 0;
+
+  const instruction = INSTRUCTION_PHRASES.filter(p => lower.includes(p));
+  const sales = SALES_PHRASES.filter(p => lower.includes(p));
+  const map = pageLanguageMap(md);
+  const pages = map.total_pages || 0;
+
+  const reasons = [];
+  let verdict = 'manual';
+  if (modelHits === 0) { verdict = 'reject'; reasons.push('the model number never appears in the text'); }
+  if (instruction.length < 3) { verdict = 'reject'; reasons.push(`only ${instruction.length} instruction phrases`); }
+  if (md.length < 8000) { verdict = 'reject'; reasons.push('too short to be a manual'); }
+  if (sales.length >= 2 && instruction.length < 6) {
+    verdict = 'reject'; reasons.push(`reads like sales material (${sales.join(', ')})`);
+  }
+  // A catalogue DOES name many models — but names this one only in passing.
+  if (verdict === 'manual' && pages > 40 && modelHits <= 2) {
+    verdict = 'doubtful';
+    reasons.push(`${pages} pages but the model is named only ${modelHits}×`);
+  }
+  return {
+    verdict, reasons,
+    model_hits: modelHits,
+    instruction_phrases: instruction.length,
+    sales_phrases: sales,
+    chars: md.length,
+    pages,
+    language_map: map,
+  };
+}
+
+/**
+ * Walk the ranked candidates and return the FIRST that actually qualifies.
+ *
+ * Every attempt is reported, pass or fail. When the pipeline ends up with a
+ * poor source, the reason has to be readable afterwards without re-running
+ * anything — that is what made run #1's ManualsLib reprint diagnosable.
+ */
+export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = {}) {
+  const maxTries = opts.maxTries ?? 3;
+  const found = await findManual(env, brandRaw, modelRaw, canonModel);
+  const attempts = [];
+
+  // Support pages are followed first — they are the manufacturer telling us
+  // where its own documents live.
+  const queue = [];
+  for (const c of found.candidates) {
+    if (c.follow) {
+      const f = await followForPdfs(c.url);
+      attempts.push({ stage: 'follow', url: c.url, links: f.links?.length ?? 0,
+                      error: f.error, status: f.status });
+      for (const link of (f.links || []).slice(0, 6)) {
+        const { score, reasons } = scoreCandidate(link, '', found.brand, canonModel);
+        queue.push({ url: link, via: 'support_page', score: score + 40,
+                     reasons: [...reasons, 'linked from a manufacturer support page'] });
+      }
+    }
+  }
+  queue.push(...found.candidates.filter(c => !c.follow));
+  queue.sort((a, b) => b.score - a.score);
+
+  let accepted = null;
+  for (const c of queue.slice(0, maxTries)) {
+    const head = await verifyPdf(c.url);
+    if (!head.ok) { attempts.push({ stage: 'head', url: c.url, ...head }); continue; }
+
+    let md = '';
+    try {
+      const r = await fetch(c.url, {
+        headers: { 'user-agent': 'Mozilla/5.0 (inventaire manual fetcher)' },
+        redirect: 'follow' });
+      const buf = await r.arrayBuffer();
+      const conv = await env.AI.toMarkdown({
+        name: (c.url.split('/').pop() || 'manual.pdf').split('?')[0],
+        blob: new Blob([buf], { type: 'application/pdf' }) });
+      md = conv?.data || '';
+    } catch (e) {
+      attempts.push({ stage: 'convert', url: c.url, error: String(e) });
+      continue;
+    }
+
+    const q = qualifyManual(md, canonModel);
+    attempts.push({ stage: 'qualify', url: c.url, score: c.score, via: c.via,
+                    verdict: q.verdict, reasons: q.reasons,
+                    model_hits: q.model_hits, pages: q.pages, chars: q.chars,
+                    instruction_phrases: q.instruction_phrases,
+                    languages: Object.keys(q.language_map.languages || {}) });
+    if (q.verdict === 'manual') {
+      accepted = { url: c.url, via: c.via, score: c.score, qualification: q };
+      break;
+    }
+  }
+
+  return { brand: found.brand, model: found.model, ranked: found.candidates,
+           attempts, accepted,
+           outcome: accepted ? 'manual acquired'
+                             : 'no candidate qualified — needs a hand-built rule or a human' };
+}
+
+/** Probe endpoint: /api/probe/acquire?brand=Husqvarna&model=545RXT */
+export async function probeAcquireHandler(request, env) {
+  const u = new URL(request.url);
+  const brand = u.searchParams.get('brand');
+  const model = u.searchParams.get('model');
+  if (!brand || !model) return json({ error: 'pass ?brand=&model=' }, 400);
+  const canon = model.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const t0 = Date.now();
+  const r = await acquireManual(env, brand, model, canon);
+  return json({ ...r, ms: Date.now() - t0 });
 }
 
 /** Probe endpoint: /api/probe/source?brand=Makita&model=GA5030R */
