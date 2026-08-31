@@ -217,6 +217,128 @@ automatically; the command line does not.
 
 ---
 
+### P1.2 PROBE RUN #1 — 31 Aug 2026: platform passes, sourcing is the real problem
+
+**What passed.** `toMarkdown` converted a 10 MB, 160-page PDF into 613,470
+characters of usable text in 5.9 s of *wall clock* — no CPU charge worth
+counting, no 403, no paid-plan error. **The free plan is enough.** The
+extraction stage does not need to be redesigned and no money needs to be
+spent.
+
+**What failed, and it is more important.** The probe was pointed at
+`eu-data.manualslib.com/...`. The metadata gave it away:
+
+```
+Creator = wkhtmltopdf 0.12.6      Producer = Qt 4.8.7
+Title   = manualslib.de/manual/1375202/Dewalt-Dwe490.html
+```
+
+That is **ManualsLib's web page printed to PDF** — and for the DWE**490**,
+not the DWE**492** that was asked for. Every numeric field in the probe
+output looked like a clean success. Only the provenance metadata revealed
+it. A guide written from that file could never honestly carry the `native`
+badge (D45), and nothing downstream would have noticed.
+
+=> **D53**: every fetched source is checked for provenance *at fetch time* —
+aggregator domain, or `Creator`/`Producer` showing an HTML-to-PDF renderer.
+A reprint is usable content but can never be a `native` source. This is a
+machine check, not a human one; run #1 proves a human reading the numbers
+would have passed it.
+
+**The knock-on finding.** Searching for the DWE492 manual returns
+**aggregators only** — ManualsLib, manuals.co.uk, device.report, all-guides.
+The manufacturer's own file does not surface on the first page of results at
+all. DeWalt was already flagged in P0.3 as the one manufacturer with *no
+reusable URL rule*, so this is the worst case rather than the typical one —
+but it inverts the priority:
+
+| | Before run #1 | After run #1 |
+|---|---|---|
+| Primary source | web search | **the P0.3 manufacturer URL rules** |
+| Fallback | URL rules | web search, results **ranked by domain**, aggregators demoted |
+| If only an aggregator is reachable | — | use it, label the tier honestly, never `native` |
+
+**Third finding: slicing is mandatory, not an optimisation.** The document
+came to 153,368 tokens. That fits LongCat's context, but ×400 items it is
+slow and expensive, and the LLM would be reading six languages to write one
+guide. The language section must be cut out *before* the model is called.
+
+**Fourth: the first marker set was useless.** Short words (`the`, `and`,
+`nicht`) matched everywhere. Worse, the aggregator's *"Verfügbare Sprachen
+DA DE EN FR IT NL PT"* index line fired every language marker at once in the
+first 1% of the document, which is why `pt` appeared to span 0.4%–69.8%.
+Rewritten to multi-word phrases plus a **density histogram** — a real
+language section is a contiguous block, an index page is a single spike, and
+the two are now distinguishable. Page headings survive conversion
+(`page_word: 161`), so there is something to slice on.
+
+**Status: probe re-run pending** against a genuine manufacturer PDF.
+
+---
+
+### P1.2 PROBE RUN #2 — 31 Aug 2026: the manual labels its own pages
+
+Same probe, pointed at the genuine Makita EU multilingual PDF
+(`icmsmakita.eu/.../GA5030R.pdf`).
+
+| | Run #1 (ManualsLib reprint) | Run #2 (Makita original) |
+|---|---|---|
+| Size | 10.2 MB | 21.2 MB |
+| Fetch | 4 828 ms | **897 ms** |
+| Convert | 5 878 ms | **2 978 ms** |
+| Text | 613 470 chars | 462 025 chars |
+| Creator | `wkhtmltopdf 0.12.6` | `Adobe InDesign 20.0`, PDF/X-1a:2001 |
+| Sections | overlapping noise | clean and sequential |
+
+The larger file converted in **half the time** and produced **less** text —
+the reprint's excess was the aggregator's own page furniture. Provenance is
+unambiguous: a print-production file from the manufacturer's design
+department. `native` is defensible for this source.
+
+**The finding that changes stage 2.** `middle_400` showed:
+
+```
+### Page 70
+70 DUTCH
+Use with a disc-shaped wire brush ...
+```
+
+**Makita prints the language name in every page's running header, and
+toMarkdown preserves it.** The document states where each section begins and
+ends. That is not a heuristic — it is metadata.
+
+=> **D54**: slice by **page-header language names** as the primary method;
+fall back to phrase-density only for publishers who do not label pages.
+
+Why it is strictly better than the histogram:
+
+- **Exact boundaries.** Page 61–72 is Spanish, not "roughly 51.9%–60.3%".
+- **Immune to the cover trap** that broke run #1 — an index page listing
+  every language is one page, labelled or not, and cannot smear the map.
+- **Immune to shared phrases.** Run #2's `it` was a single false hit at
+  51.6%: Italian and Spanish both say *uso previsto*. A page header cannot
+  be ambiguous that way.
+- **Contiguity is checkable**, so a scattered language is detected rather
+  than silently mis-sliced.
+
+Implemented and unit-tested against a reconstruction of the Makita layout:
+84 pages, 7 languages, 100% coverage, every section contiguous, character
+offsets returned for direct slicing. Degrades cleanly to `ok: false` on
+unlabelled documents and on documents with no page headings at all.
+
+**Two smaller notes.**
+
+The PDF's own `Language=ja-JP` tag is the authoring locale — Makita is a
+Japanese company — and says nothing about the content. Ignore it.
+
+**Run #2's JSON arrived translated.** `en` had become `and` and `de` had
+become `the` — Dutch for "and" and "the". The browser detected the Dutch
+marker phrases in the response, decided the page was Dutch, and translated
+the JSON keys. Harmless here, but worth remembering: **anything read through
+a browser may not be what the server sent.**
+
+---
+
 ## P1 — Foundations
 
 **Entry:** ✔ all clear. P0.1 closed, P0.2 passed (bar Tigrinya), P0.3 done, 1.1 frozen. **Nothing blocks P1.2.**
