@@ -59,6 +59,12 @@ export const AGGREGATORS = [
   'manuals.co.uk', 'free-instruction-manuals', 'notice-facile', 'manymanuals',
   'manualsbase', 'manualmachine', 'usermanual.wiki', 'scribd', 'issuu',
   'slideshare', 'studylib', 'docplayer', 'pdfcoffee', 'yumpu',
+  // Added after run #6: manualsonline was NOT on this list, so its index
+  // page matched SUPPORT_PATHS ('/manuals/'), earned the +40 support-page
+  // bonus, and its reprint was accepted labelled `support_page`. D53 was
+  // defeated through a side door — not by a bad source, by a bad LABEL.
+  'manualsonline', 'pdfstore-manualsonline', 'prod.a.ki', 'manualsdir',
+  'manualsbrain', 'manualzilla', 'manualagent', 'retrevo', 'manualnguide',
 ];
 
 /** Words that mark a link as a manual rather than a shop listing. */
@@ -141,11 +147,20 @@ export function scoreCandidate(url, title, brandKey, canonModel, opts = {}) {
 
   // A manufacturer support page for THIS model is the most valuable HTML
   // there is — not the manual, but the page the manual hangs off.
+  //
+  // The host test is the whole point. Run #6 followed an AGGREGATOR index
+  // page that happened to contain '/manuals/' in its path, then labelled
+  // the reprint it found as manufacturer-sourced. A page is only a support
+  // page if the manufacturer serves it.
   const isSupport = SUPPORT_PATHS.some(sp => url.toLowerCase().includes(sp));
-  const follow = isSupport && named && !/\.pdf(\?|$)/i.test(url);
+  const isPdf = /\.pdf(\?|$)/i.test(url);
+  const manufacturerHost = !!(brand && brand.domains.some(d => h.includes(d))) && !agg;
+  const follow = isSupport && named && !isPdf && manufacturerHost;
+  const followReprint = isSupport && named && !isPdf && !manufacturerHost;
   if (follow) reasons.push('manufacturer support page — follow for PDF links');
+  if (followReprint) reasons.push('third-party index page — followable, but its links are reprints');
 
-  return { score, reasons, follow, named };
+  return { score, reasons, follow, followReprint, named, manufacturerHost, aggregator: agg };
 }
 
 /** One Serper call. Returns [] rather than throwing — search is a fallback. */
@@ -409,12 +424,25 @@ export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = 
 
     const q = qualifyManual(md, canonModel);
     attempts.push({ stage: 'qualify', url: c.url, score: c.score, via: c.via,
+                    provenance: c.provenance,
                     verdict: q.verdict, reasons: q.reasons,
                     model_hits: q.model_hits, pages: q.pages, chars: q.chars,
                     instruction_phrases: q.instruction_phrases,
                     languages: Object.keys(q.language_map.languages || {}) });
     if (q.verdict === 'manual') {
-      accepted = { url: c.url, via: c.via, score: c.score, qualification: q };
+      // The trust tier is decided HERE, once, from where the bytes came
+      // from — not inferred later from a URL somebody has stopped looking at.
+      const h = host(c.url);
+      const isAgg = AGGREGATORS.some(a => h.includes(a));
+      const brandCfg = BRANDS[found.brand];
+      const fromManufacturer = !isAgg && !!brandCfg?.domains.some(d => h.includes(d));
+      accepted = {
+        url: c.url, via: c.via, score: c.score,
+        provenance: c.provenance || (fromManufacturer ? 'manufacturer'
+                    : isAgg ? 'reprint' : 'third_party'),
+        trust_tier_allowed: fromManufacturer ? 'native' : 'auto',
+        qualification: q,
+      };
       break;
     }
   }
