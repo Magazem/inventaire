@@ -186,7 +186,7 @@ export async function createItemHandler(request, env, who) {
   let queued = false;
   if (created && !b.sans_manuel) {
     try {
-      await env.JOBS.send({ model_id: modelId, reason: 'new_model' });
+      await env.JOBS.send({ type: 'source', model_id: modelId, reason: 'new_model' });
       queued = true;
     } catch (e) {
       // The DB is the truth; the sweep will pick this up (design §5.1).

@@ -8,6 +8,7 @@ import { probePdfHandler } from './probe.js';
 import { probeSourceHandler, probeAcquireHandler,
          acquireManual, fetchMarkdown } from './source.js';
 import { probeGuideHandler } from './guide.js';
+import { runJob } from './pipeline.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
 import { listsHandler, lookupHandler, photoHandler, createItemHandler,
          recentHandler, inspectHandler, photoGetHandler } from './api.js';
@@ -71,9 +72,12 @@ export default {
   async queue(batch, env) {
     for (const msg of batch.messages) {
       try {
-        console.log('job', JSON.stringify(msg.body));
-        // Pipeline arrives next. Ack so nothing is stranded meanwhile.
-        msg.ack();
+        const r = await runJob(env, msg.body);
+        console.log('job', JSON.stringify(msg.body), '->', JSON.stringify(r));
+        // A job that asks to retry (a guide waiting on its pivot) goes back
+        // on the queue. Everything else is acked: the DATABASE is the truth,
+        // and the daily sweep re-queues anything genuinely stranded.
+        if (r?.retry) msg.retry(); else msg.ack();
       } catch (err) {
         console.error('job failed', err);
         msg.retry();
@@ -90,7 +94,7 @@ export default {
       `SELECT model_id FROM models
         WHERE ia_etat = 'pending' AND ia_tentatives < 3 LIMIT 50`).all();
     for (const row of stranded.results ?? [])
-      await env.JOBS.send({ model_id: row.model_id, reason: 'sweep' });
+      await env.JOBS.send({ type: 'source', model_id: row.model_id, reason: 'sweep' });
     console.log(`sweep re-queued ${stranded.results?.length ?? 0}`);
   },
 };
