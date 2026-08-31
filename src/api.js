@@ -214,3 +214,49 @@ export async function recentHandler(env) {
       ORDER BY u.added_at DESC LIMIT 20`).all();
   return json({ items: (rows.results || []).map(r => ({ ...r, names: JSON.parse(r.names) })) });
 }
+
+/**
+ * Read-only inspection dump. This is a DIAGNOSTIC view, not the admin page —
+ * it exists so a capture can be checked immediately instead of waiting for
+ * the admin page in a later phase. Everything here is SELECT only.
+ */
+export async function inspectHandler(env) {
+  const [models, units, stock, journal] = await Promise.all([
+    env.DB.prepare(
+      `SELECT model_id,type,brand,model_number,model_number_raw,category,suivi,
+              consommable,photo,photo_plaque,names,manual_state,danger_eleve,
+              approbation,epi_confirme,ia_etat,ia_tentatives,ia_erreur,
+              created_at,created_by
+         FROM models ORDER BY created_at DESC`).all(),
+    env.DB.prepare(
+      `SELECT unit_id,model_id,photo,emplacement,statut,notes,added_at,added_by
+         FROM units ORDER BY added_at DESC`).all(),
+    env.DB.prepare(
+      `SELECT model_id,unite_mesure,quantites,seuil_bas,updated_at FROM stock`).all(),
+    env.DB.prepare(
+      `SELECT at,model_id,etape,ok,detail FROM journal
+        ORDER BY at DESC LIMIT 100`).all(),
+  ]);
+  const M = (models.results || []).map(r => ({ ...r, names: JSON.parse(r.names || '{}') }));
+  return json({
+    counts: { models: M.length, units: (units.results || []).length },
+    models: M,
+    units: units.results || [],
+    stock: stock.results || [],
+    journal: journal.results || [],
+  });
+}
+
+/** Serve one R2 photo. Session-gated like every other /api/ route. */
+export async function photoGetHandler(request, env) {
+  const key = new URL(request.url).searchParams.get('key');
+  if (!key) return json({ error: 'key required' }, 400);
+  const obj = await env.PHOTOS.get(key);
+  if (!obj) return json({ error: 'not_found', key }, 404);
+  return new Response(obj.body, {
+    headers: {
+      'content-type': obj.httpMetadata?.contentType || 'image/jpeg',
+      'cache-control': 'private, max-age=3600',
+    },
+  });
+}

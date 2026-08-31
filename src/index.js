@@ -3,9 +3,10 @@
  * See spec/data-model.md (frozen) and spec/output-contract.md.
  */
 import { capturePage } from './capture-page.js';
+import { inspectPage } from './inspect-page.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
-import { listsHandler, lookupHandler, photoHandler,
-         createItemHandler, recentHandler } from './api.js';
+import { listsHandler, lookupHandler, photoHandler, createItemHandler,
+         recentHandler, inspectHandler, photoGetHandler } from './api.js';
 
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -18,6 +19,12 @@ export default {
     if (p === '/health') return json(await health(env));
     if (p === '/' || p === '/capture')
       return new Response(capturePage(), {
+        headers: { 'content-type': 'text/html; charset=utf-8',
+                   'cache-control': 'no-store' } });
+    // Read-only diagnostic view. The page itself is a shell; its data comes
+    // from /api/inspect, which is session-gated like everything else.
+    if (p === '/inspect')
+      return new Response(inspectPage(), {
         headers: { 'content-type': 'text/html; charset=utf-8',
                    'cache-control': 'no-store' } });
 
@@ -37,6 +44,8 @@ export default {
 
       if (p === '/api/lists') return listsHandler(env);
       if (p === '/api/recent') return recentHandler(env);
+      if (p === '/api/inspect') return inspectHandler(env);
+      if (p === '/api/photo') return photoGetHandler(request, env);
       if (p === '/api/models/lookup' && request.method === 'POST')
         return lookupHandler(request, env);
       if (p === '/api/photos' && request.method === 'POST')
@@ -108,9 +117,22 @@ async function health(env) {
 
   const pw = env.CAPTURE_PASSWORD;
   const pok = typeof pw === 'string' && pw.length >= 8;
-  out.bindings.capture_password = { ok: pok, note: pok
-    ? 'set' : 'NOT SET — the capture app is unusable until you run: wrangler secret put CAPTURE_PASSWORD' };
-  if (!pok) out.ok = false;
+  // Report shape, never value. A length two higher than you expect means
+  // PowerShell stored the surrounding quotes; trimmed !== raw means stray
+  // whitespace or a newline came along. Both make login fail "wrongly".
+  const shape = [];
+  if (typeof pw === 'string') {
+    if (pw !== pw.trim()) shape.push('has leading/trailing whitespace');
+    if (/^["'].*["']$/.test(pw)) shape.push('starts and ends with a quote character');
+    if (pw.charCodeAt(0) === 0xFEFF) shape.push('starts with a UTF-8 BOM');
+  }
+  out.bindings.capture_password = {
+    ok: pok && shape.length === 0,
+    note: pok
+      ? `set (${pw.length} chars)` + (shape.length ? ' — ' + shape.join('; ') : '')
+      : 'NOT SET — see SETUP-WINDOWS.md',
+  };
+  if (!out.bindings.capture_password.ok) out.ok = false;
 
   return out;
 }
