@@ -98,7 +98,7 @@ const host = u => { try { return new URL(u).hostname.toLowerCase(); } catch { re
  * Score one search result. Positive is better; the reasons are returned so
  * a wrong ranking can be diagnosed instead of guessed at.
  */
-export function scoreCandidate(url, title, brandKey, canonModel) {
+export function scoreCandidate(url, title, brandKey, canonModel, opts = {}) {
   const h = host(url);
   const lower = (url + ' ' + (title || '')).toLowerCase();
   const reasons = [];
@@ -119,8 +119,13 @@ export function scoreCandidate(url, title, brandKey, canonModel) {
   // ---- the model number is not a bonus, it is the point ---------------
   // Run #4's brochure scored 75 with "model number absent" costing only 15.
   // A document that never names the model cannot be that model's manual.
+  // Links harvested FROM a model-specific support page inherit the model
+  // from that page — Husqvarna's own PDF filenames are opaque asset ids
+  // (`aj-874490.pdf`) and would all be disqualified on a name they never
+  // carried. The content check still requires the model to appear in the
+  // text, so nothing is waved through.
   let named = false;
-  if (canonModel) {
+  if (canonModel && opts.requireModel !== false) {
     const urlCanon = url.toUpperCase().replace(/[^A-Z0-9]/g, '');
     const titleCanon = (title || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
     if (urlCanon.includes(canonModel)) { score += 25; named = true; reasons.push('model in URL'); }
@@ -224,8 +229,10 @@ export async function findManual(env, brandRaw, modelRaw, canonModel) {
       for (const r of s.results) {
         if (seen.has(r.link)) continue;
         seen.add(r.link);
-        const { score, reasons } = scoreCandidate(r.link, r.title, brandKey, canonModel);
-        out.candidates.push({ url: r.link, title: r.title, via: 'search', score, reasons });
+        // Spread the whole result: `follow` and `named` were being dropped
+        // here, so support pages were never followed (run #5).
+        const sc = scoreCandidate(r.link, r.title, brandKey, canonModel);
+        out.candidates.push({ url: r.link, title: r.title, via: 'search', ...sc });
       }
       // A manufacturer-domain PDF is as good as it gets; stop paying for
       // queries once one is in hand. Serper's free pot is 2 500 total.
@@ -236,10 +243,16 @@ export async function findManual(env, brandRaw, modelRaw, canonModel) {
     // Verify the top few in parallel — 1 KB each, so breadth is cheap and
     // run #4 showed three was too narrow: the real manual sat at rank four.
     // Support pages are skipped; they are MEANT to be HTML.
-    const toCheck = out.candidates.filter(c => !c.follow && c.score > -50).slice(0, 6);
+    const toCheck = out.candidates.filter(c => !c.follow && c.score > -50).slice(0, 8);
     await Promise.all(toCheck.map(async c => {
       c.verified = await verifyPdf(c.url);
-      if (!c.verified.ok) c.score -= 60;
+      if (c.verified.ok) {
+        // Confirmed PDF beats a guess from the file extension. Run #5's real
+        // manual was served from `?controller=attachment&id_attachment=152`.
+        c.score += 25; c.reasons.push('confirmed PDF on fetch');
+      } else {
+        c.score -= 60; c.reasons.push(`not a PDF (${c.verified.content_type || c.verified.status})`);
+      }
     }));
     out.candidates.sort((a, b) => b.score - a.score);
   }
@@ -349,7 +362,7 @@ export function qualifyManual(md, canonModel) {
  * anything — that is what made run #1's ManualsLib reprint diagnosable.
  */
 export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = {}) {
-  const maxTries = opts.maxTries ?? 3;
+  const maxTries = opts.maxTries ?? 4;
   const found = await findManual(env, brandRaw, modelRaw, canonModel);
   const attempts = [];
 
@@ -362,13 +375,16 @@ export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = 
       attempts.push({ stage: 'follow', url: c.url, links: f.links?.length ?? 0,
                       error: f.error, status: f.status });
       for (const link of (f.links || []).slice(0, 6)) {
-        const { score, reasons } = scoreCandidate(link, '', found.brand, canonModel);
+        const { score, reasons } = scoreCandidate(link, '', found.brand, canonModel,
+                                                  { requireModel: false });
         queue.push({ url: link, via: 'support_page', score: score + 40,
                      reasons: [...reasons, 'linked from a manufacturer support page'] });
       }
     }
   }
-  queue.push(...found.candidates.filter(c => !c.follow));
+  // Anything already proven not to be a PDF is skipped rather than allowed
+  // to burn a try — each try is a full fetch plus conversion.
+  queue.push(...found.candidates.filter(c => !c.follow && c.verified?.ok !== false));
   queue.sort((a, b) => b.score - a.score);
 
   let accepted = null;
