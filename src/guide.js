@@ -129,27 +129,55 @@ async function callLongCat(env, { system, user, schema, maxTokens = 4000,
         model: MODEL,
         temperature: 0,
         max_tokens: maxTokens,
-        // Fixed instructions first, variable text last: the constant prefix
-        // hits LongCat's free cache (design §2.1).
+        // STREAMING, and not for the user experience: LongCat's API sits
+        // behind Cloudflare with a 100 s origin timeout. A guide takes
+        // 75-100 s to reason and write, and run #12 lost two guides to
+        // "error code: 524" at exactly that edge. With bytes flowing, no
+        // proxy between us and the model has a reason to hang up.
+        stream: true,
+        stream_options: { include_usage: true },
         messages: [{ role: 'system', content: system },
                    { role: 'user', content: user }],
         response_format: { type: 'json_schema', json_schema: schema },
       }),
     });
+    if (!r.ok) {
+      const ms = Date.now() - t0;
+      return { ok: false, stop: 'http', status: r.status,
+               error: (await r.text()).slice(0, 500), ms };
+    }
+
+    // Reassemble the SSE stream. Each "data:" line is one JSON chunk with a
+    // delta; the last carries finish_reason, and usage arrives on its own.
+    let content = '', reasoningLen = 0, finish = null, usage = null, buf = '';
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        let j;
+        try { j = JSON.parse(payload); } catch { continue; }
+        if (j.usage) usage = j.usage;
+        const ch = j.choices?.[0];
+        if (!ch) continue;
+        if (ch.delta?.content) content += ch.delta.content;
+        if (ch.delta?.reasoning_content) reasoningLen += ch.delta.reasoning_content.length;
+        if (ch.finish_reason) finish = ch.finish_reason;
+      }
+    }
     const ms = Date.now() - t0;
-    if (!r.ok) return { ok: false, stop: 'http', status: r.status,
-                        error: (await r.text()).slice(0, 500), ms };
-    const d = await r.json();
-    const choice = d.choices?.[0];
-    // The probe found `content` can be ABSENT, not merely empty.
-    const content = choice?.message?.content ?? null;
-    return {
-      ok: true, ms,
-      finish_reason: choice?.finish_reason ?? null,
-      content,
-      usage: d.usage ?? null,
-      reasoning_len: (choice?.message?.reasoning_content || '').length,
-    };
+    return { ok: true, ms, finish_reason: finish,
+             // "absent" and "empty" are both null here, as the non-streaming
+             // path treated them: nothing usable came back.
+             content: content || null, usage, reasoning_len: reasoningLen };
   } catch (e) {
     const aborted = e?.name === 'AbortError';
     return { ok: false, stop: aborted ? 'client_timeout' : 'network',
@@ -278,7 +306,7 @@ export async function writeGuide(env, { text, lang, brand, model }) {
     // 3 521 characters of reasoning before writing a single guide token —
     // and a richer prompt makes a reasoning model think MORE, not less.
     maxTokens: 8000,
-    timeoutMs: 150_000,
+    timeoutMs: 240_000,
   });
   if (!call.ok) return call;
 
