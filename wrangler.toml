@@ -35,7 +35,7 @@ queue               = "inventaire-jobs"
 max_batch_size      = 1
 max_batch_timeout   = 5
 max_retries         = 3
-max_concurrency     = 2
+max_concurrency     = 4   # 429s back off 120 s; this probes LongCat's real ceiling
 
 # Daily sweep for stranded jobs
 [triggers]

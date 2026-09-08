@@ -115,7 +115,7 @@ function ppeSchema() {
  * message would then expire after 24 h and the item would vanish silently.
  */
 async function callLongCat(env, { system, user, schema, maxTokens = 4000,
-                                  timeoutMs = 60_000 }) {
+                                  timeoutMs = 60_000, thinking = true }) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const t0 = Date.now();
@@ -136,6 +136,11 @@ async function callLongCat(env, { system, user, schema, maxTokens = 4000,
         // proxy between us and the model has a reason to hang up.
         stream: true,
         stream_options: { include_usage: true },
+        // Reasoning is 75 of the 90 seconds a guide costs. Translation does
+        // not need a minute of deliberation over a six-section guide it was
+        // handed clean; writing from a raw manual probably does. So it is a
+        // per-call choice, and the probe can measure both.
+        thinking: { type: thinking ? 'enabled' : 'disabled' },
         messages: [{ role: 'system', content: system },
                    { role: 'user', content: user }],
         response_format: { type: 'json_schema', json_schema: schema },
@@ -291,8 +296,22 @@ export function validateGuide(lang, sections) {
 const LANG_NAME = { fr: 'French', en: 'English', de: 'German', it: 'Italian',
   pt: 'Portuguese', es: 'Spanish', nl: 'Dutch', ar: 'Arabic', ti: 'Tigrinya' };
 
-function systemPrompt(lang) {
+function systemPrompt(lang, mode = 'manual') {
   const name = LANG_NAME[lang] || lang;
+  if (mode === 'translate') return [
+    `You translate a workplace safety guide into ${name}.`,
+    '',
+    'RULES:',
+    `1. Write ONLY in ${name}.`,
+    '2. Translate every item. Do not add, drop, merge or reorder items.',
+    '3. Keep each section under the same key it arrived in. A section that',
+    '   arrives empty stays empty.',
+    '4. Never soften a warning. Never invert a negation. "Never" stays "never".',
+    '5. Use plain words a worker who reads little would understand.',
+    '',
+    'The input is labelled [usage] [securite] [demarrage] [utilisation] [arret]',
+    '[problemes] — one line per item under each label.',
+  ].join('\n');
   return [
     `You rewrite manufacturer instruction manuals into short workplace guides for ${name} speakers.`,
     '',
@@ -318,11 +337,14 @@ function systemPrompt(lang) {
 }
 
 /** Write one guide, one language, from supplied text. Layer 5: narrow calls. */
-export async function writeGuide(env, { text, lang, brand, model }) {
+export async function writeGuide(env, { text, lang, brand, model, thinking = true,
+                                        mode = 'manual' }) {
   const head = `Machine: ${brand || ''} ${model || ''}`.trim();
+  const label = mode === 'translate' ? 'GUIDE TO TRANSLATE' : 'MANUAL TEXT';
   const call = await callWithBudget(env, {
-    system: systemPrompt(lang),
-    user: `${head}\n\nMANUAL TEXT:\n\n${text}`,
+    system: systemPrompt(lang, mode),
+    user: `${head}\n\n${label}:\n\n${text}`,
+    thinking,
     schema: guideSchema(),
     // Sized for REASONING PLUS OUTPUT, not output alone. Run #9 produced
     // 3 521 characters of reasoning before writing a single guide token —
@@ -449,7 +471,8 @@ export async function probeGuideHandler(request, env, deps) {
   const brand = u.searchParams.get('brand');
   const model = u.searchParams.get('model');
   const lang = u.searchParams.get('lang') || 'fr';
-  if (!brand || !model) return json({ error: 'pass ?brand=&model=&lang=' }, 400);
+  const thinking = u.searchParams.get('thinking') !== '0';
+  if (!brand || !model) return json({ error: 'pass ?brand=&model=&lang=[&thinking=0]' }, 400);
 
   const canon = model.toUpperCase().replace(/[^A-Z0-9]/g, '');
   const t0 = Date.now();
@@ -466,7 +489,7 @@ export async function probeGuideHandler(request, env, deps) {
                   available: Object.keys(pageLanguageMap(md).languages || {}),
                   detected: detectLanguage(md) });
 
-  const guide = await writeGuide(env, { text: slice.text, lang, brand, model });
+  const guide = await writeGuide(env, { text: slice.text, lang, brand, model, thinking });
 
   // PPE is matched in CODE against the guide's own safety text (D62). No
   // model call: the guide already names the equipment, in the target
@@ -487,7 +510,7 @@ export async function probeGuideHandler(request, env, deps) {
   };
 
   return json({
-    stage: 'done', ms: Date.now() - t0,
+    stage: 'done', ms: Date.now() - t0, thinking,
     source: { url: acq.accepted.url, provenance: acq.accepted.provenance,
               tier_allowed: acq.accepted.trust_tier_allowed },
     slice: { method: slice.method, chars: slice.chars, pages: slice.pages || null },

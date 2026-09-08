@@ -272,7 +272,9 @@ export async function jobTranslate(env, { model_id, lang, from }) {
   const pivotText = SECTIONS
     .map(k => `[${k}]\n` + (guides[pivot].sections[k] || []).join('\n')).join('\n\n');
 
-  const result = await writeGuide(env, { text: pivotText, lang, brand: m.brand, model: m.model_number });
+  const result = await writeGuide(env, { text: pivotText, lang, brand: m.brand,
+                                         model: m.model_number, mode: 'translate',
+                                         thinking: false });
   if (!result.ok) return recordFailure(env, model_id, lang, result);
 
   const origin = {
