@@ -140,10 +140,21 @@ export async function jobSource(env, { model_id }) {
   return { ok: true, state: 'disponible', natives, queued: phase1 };
 }
 
-/** Shared tail: store one guide, update rollups, journal it. */
+/**
+ * Store ONE guide, atomically, under its own key.
+ *
+ * This used to read the whole `guides` JSON, add a language, and write it
+ * all back. With four translations running at once — the speed the
+ * reasoning switch bought us — two jobs would read the same snapshot and
+ * the second write erased the first. STIHL HS45 had Portuguese for about a
+ * minute, then it was gone. Last writer wins is not a storage strategy.
+ *
+ * json_set touches one key inside the column in a single statement, so
+ * concurrent languages cannot see or clobber each other. The rollup
+ * (ia_etat) is computed from a fresh read AFTER the write.
+ */
 async function storeGuide(env, m, lang, result, origin) {
-  const guides = JSON.parse(m.guides || '{}');
-  guides[lang] = {
+  const entry = {
     sections: result.sections,
     tier: deriveTier({ origin, checks: [], verified_by: null }),
     origin, checks: [],
@@ -162,12 +173,20 @@ async function storeGuide(env, m, lang, result, origin) {
     ppeArgs = [JSON.stringify(ppe.epi), JSON.stringify(ppe.dangers), ppe.source];
   }
 
-  const done = TARGET_LANGS.every(l => validGuide(guides[l]));
   await env.DB.prepare(
-    `UPDATE models SET guides=?${ppeSql}, ia_etat=?, ia_erreur=NULL, ia_derniere=?,
-            updated_at=? WHERE model_id=?`
-  ).bind(JSON.stringify(guides), ...ppeArgs,
-         done ? 'done' : 'pending', now(), now(), m.model_id).run();
+    `UPDATE models
+        SET guides = json_set(COALESCE(NULLIF(guides,''), '{}'), '$.' || ?, json(?))${ppeSql},
+            ia_erreur = NULL, ia_derniere = ?, updated_at = ?
+      WHERE model_id = ?`
+  ).bind(lang, JSON.stringify(entry), ...ppeArgs, now(), now(), m.model_id).run();
+
+  // Rollup from what is ACTUALLY stored now, not from this job's snapshot.
+  const fresh = await env.DB.prepare(
+    `SELECT guides FROM models WHERE model_id = ?`).bind(m.model_id).first();
+  const guides = JSON.parse(fresh?.guides || '{}');
+  const done = TARGET_LANGS.every(l => validGuide(guides[l]));
+  await env.DB.prepare(`UPDATE models SET ia_etat = ? WHERE model_id = ?`)
+    .bind(done ? 'done' : 'pending', m.model_id).run();
   return guides;
 }
 
