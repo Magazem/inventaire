@@ -243,6 +243,28 @@ export function checkScript(lang, sections) {
   };
 }
 
+/**
+ * A long item is split at sentence boundaries, not rejected.
+ *
+ * MS180's English guide failed validation for "1 item over 400 chars" — a
+ * correct instruction, merely long. Rejecting the whole guide and retrying
+ * would have produced the same text again at the same cost. Splitting is
+ * deterministic, loses nothing, and is exactly what the prompt asked the
+ * model to do in the first place.
+ */
+export function splitLong(item, max = 400) {
+  if (typeof item !== 'string' || item.length <= max) return [item];
+  const parts = item.split(/(?<=[.!?…])\s+(?=[A-ZÀ-ÝА-Я«"'])/u);
+  const out = [];
+  let cur = '';
+  for (const p of parts) {
+    if ((cur + ' ' + p).trim().length > max && cur) { out.push(cur.trim()); cur = p; }
+    else cur = (cur + ' ' + p).trim();
+  }
+  if (cur) out.push(cur.trim());
+  return out.length ? out : [item];
+}
+
 /** Semantic validation the schema cannot express (Layer 3). */
 export function validateGuide(lang, sections) {
   const problems = [];
@@ -311,7 +333,8 @@ export async function writeGuide(env, { text, lang, brand, model }) {
   if (!call.ok) return call;
 
   const sections = {};
-  for (const k of SECTIONS) sections[k] = Array.isArray(call.data[k]) ? call.data[k] : [];
+  for (const k of SECTIONS)
+    sections[k] = (Array.isArray(call.data[k]) ? call.data[k] : []).flatMap(splitLong);
   const check = validateGuide(lang, sections);
 
   // `[]` from the model means "the manual does not cover this". The record
@@ -411,8 +434,12 @@ export function sliceForLanguage(md, lang) {
     // fall through: too small to be the manual in this language
   }
   const det = detectLanguage(md);
-  if (det.language === lang)
-    return { text: md, method: 'whole_document', detected: det, chars: md.length };
+  if (det.language === lang) {
+    // Same cap as the pipeline's whole-document path: safety comes first in
+    // every manual, and 65 000 tokens in one call is neither fast nor cheap.
+    const text = md.length > 100_000 ? md.slice(0, 100_000) : md;
+    return { text, method: 'whole_document', detected: det, chars: text.length };
+  }
   return null;
 }
 

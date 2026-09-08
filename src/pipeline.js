@@ -32,6 +32,7 @@ const PIVOTS = ['en', 'fr', 'de'];
 
 const now = () => new Date().toISOString();
 const mdKey = id => `manuals/${id}.md`;
+const WHOLE_DOC_CAP = 100_000;
 
 async function getModel(env, modelId) {
   // ia_meta MUST be here. Run #11's first bug: it was not, so `meta` was
@@ -200,6 +201,12 @@ async function recordFailure(env, modelId, lang, result) {
 export async function jobGuide(env, { model_id, lang, whole_doc }) {
   const m = await getModel(env, model_id);
   if (!m) return { ok: false, reason: 'model gone' };
+  // Idempotent. "Relancer tout" was clicked three times in a minute and
+  // queued every job three times; translations already skipped, guides did
+  // not, so MS180's English was requested three times over. LongCat time is
+  // the scarcest thing in this system.
+  if (validGuide(JSON.parse(m.guides || '{}')[lang]))
+    return { ok: true, lang, skipped: 'already present' };
   const obj = await env.PHOTOS.get(mdKey(model_id));
   if (!obj) return { ok: false, reason: 'no parked manual — re-run source' };
   const md = await obj.text();
@@ -208,7 +215,10 @@ export async function jobGuide(env, { model_id, lang, whole_doc }) {
 
   let text, method, pages = null, fromLang = null;
   if (whole_doc) {
-    text = md; method = 'whole_document'; fromLang = meta.doc_lang || null;
+    // Cap it. STIHL FS 260C is 261 000 characters — 65 000 tokens for one
+    // call, and the safety chapters are at the FRONT of every manual.
+    text = md.length > WHOLE_DOC_CAP ? md.slice(0, WHOLE_DOC_CAP) : md;
+    method = 'whole_document'; fromLang = meta.doc_lang || null;
   } else {
     const slice = sliceForLanguage(md, lang);
     if (!slice) return { ok: false, reason: `no usable ${lang} section` };

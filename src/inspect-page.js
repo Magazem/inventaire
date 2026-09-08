@@ -239,12 +239,19 @@ async function saveEdit(id){
   setTimeout(load, 1200);
 }
 
+let requeueBusy = false;
 async function requeue(id){
+  // One click. The queue is slow — a guide is a minute or more — and every
+  // extra click is another round of LongCat calls for the same result.
+  if (requeueBusy) return;
+  requeueBusy = true;
+  setTimeout(() => { requeueBusy = false; }, 60000);
   const q = id ? ('?model_id=' + encodeURIComponent(id)) : '';
   const r = await fetch('/api/requeue' + q, { method: 'POST' });
   const d = await r.json();
   document.getElementById('counts').textContent =
-    (d.queued || 0) + ' modèle(s) relancé(s) — recharger dans une minute';
+    (d.queued || 0) + ' modele(s) relance(s). Comptez environ une minute par langue et par modele ' +
+    '- les guides arrivent au fil des heures, pas des minutes.';
   setTimeout(load, 1500);
 }
 
