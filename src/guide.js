@@ -176,7 +176,8 @@ async function callWithBudget(env, args) {
                     reasoning_len: r.reasoning_len,
                     content_len: r.content?.length ?? null });
 
-    if (!r.ok) return { ok: false, reason: r.stop, error: r.error, attempts };
+    if (!r.ok) return { ok: false, reason: r.stop, status: r.status ?? null,
+                        error: r.error, attempts };
 
     if (r.finish_reason === 'length' || !r.content) {
       budget *= 2;                        // D51 — bigger budget, once
@@ -359,12 +360,27 @@ export function deriveTier({ origin, checks = [], verified_by = null }) {
  * Cut the slice for one language out of a converted manual.
  * Returns null when this document does not carry that language at all.
  */
+/**
+ * A "section" of three pages at the back of a 52-page manual is not that
+ * language's manual — it is the multilingual declaration of conformity and
+ * the address list. The STIHL HSA 45 run sliced pages 49-51 as "French",
+ * the model correctly found nothing to say, and the empty result was then
+ * used as the pivot for five translations. Below these thresholds the
+ * language counts as ABSENT and is translated from a real pivot instead.
+ */
+const MIN_SECTION_PAGES = 6;
+const MIN_SECTION_CHARS = 6000;
+
 export function sliceForLanguage(md, lang) {
   const map = pageLanguageMap(md);
   if (map.ok && map.languages?.[lang]) {
     const e = map.languages[lang];
-    return { text: md.slice(e.from, e.to), method: 'page_headers',
-             pages: [e.first_page, e.last_page], chars: e.to - e.from };
+    const pages = e.last_page - e.first_page + 1;
+    const chars = e.to - e.from;
+    if (pages >= MIN_SECTION_PAGES && chars >= MIN_SECTION_CHARS)
+      return { text: md.slice(e.from, e.to), method: 'page_headers',
+               pages: [e.first_page, e.last_page], chars };
+    // fall through: too small to be the manual in this language
   }
   const det = detectLanguage(md);
   if (det.language === lang)

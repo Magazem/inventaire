@@ -131,7 +131,7 @@ function pageSignals(md) {
  * from that must never be labelled `native` (D45) — so the detection has to
  * happen here, at the source, not be spotted later by a human.
  */
-function provenance(md, url) {
+export function provenance(md, url) {
   const head = md.slice(0, 1500);
   const grab = k => (head.match(new RegExp('^- ' + k + '=(.*)$', 'm')) || [])[1] || null;
   const creator = grab('Creator'), producer = grab('Producer'), title = grab('Title');

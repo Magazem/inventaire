@@ -10,6 +10,8 @@
  *  - New models are queued for AI; known models are not (no duplicate work).
  */
 
+import { requeueMissing } from './pipeline.js';
+
 /** SQL mirror of canonicalKey(): strip space, hyphen, dot, slash, underscore. */
 const CANON_SQL = `UPPER(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
   model_number,' ',''),'-',''),'.',''),'/',''),'_',''))`;
@@ -308,11 +310,13 @@ export async function requeueHandler(request, env, who) {
                                   THEN 'a_rediger' ELSE manual_state END,
               updated_at=? WHERE model_id=?`
     ).bind(now(), r.model_id).run();
-    await env.JOBS.send({ type: 'source', model_id: r.model_id, reason: 'manual_requeue' });
+    // Only what is missing: a parked manual is not re-fetched, good guides
+    // are not rewritten.
+    const rq = await requeueMissing(env, r.model_id);
+    out.push({ model_id: r.model_id, queued: true, jobs: rq.queued });
     await env.DB.prepare(
       `INSERT INTO journal (at,model_id,etape,ok,detail) VALUES (?,?,?,1,?)`
-    ).bind(now(), r.model_id, 'requeued', JSON.stringify({ by: who })).run();
-    out.push({ model_id: r.model_id, queued: true });
+    ).bind(now(), r.model_id, 'requeued', JSON.stringify({ by: who, jobs: rq.queued })).run();
   }
   if (!out.length) return json({ ok: true, note: 'nothing was waiting', queued: 0 });
   return json({ ok: true, queued: out.filter(o => o.queued).length, models: out });
@@ -484,4 +488,106 @@ export async function editModelHandler(request, env, who) {
          JSON.stringify({ by: who, champs: Object.keys(b).filter(k => k !== 'model_id'),
                           warnings, requeued })).run();
   return json({ ok: true, model_id: id, warnings, requeued });
+}
+
+/**
+ * D57 — a human supplies the manual.
+ *
+ * Some manuals are unreachable from a datacenter and always will be:
+ * discontinued models, bot-blocked hosts, the paper copy in the drawer.
+ * But the person standing next to the machine can often find the PDF in
+ * thirty seconds from an office browser. This is that path.
+ *
+ * It is NOT a bypass. The file goes through the same conversion and the
+ * same content check as anything the search finds — "is this a manual, and
+ * is it for this model?" — and is refused with reasons if it fails. A
+ * human can override with `force=1`, and that override is recorded.
+ *
+ * Provenance is `upload`: the machine cannot know whether the file is the
+ * manufacturer's original, so the tier is `auto` until a person verifies.
+ */
+export async function uploadManualHandler(request, env, who, deps) {
+  const u = new URL(request.url);
+  const modelId = u.searchParams.get('model_id');
+  const force = u.searchParams.get('force') === '1';
+  const filename = (u.searchParams.get('name') || 'manuel.pdf').replace(/[^\w.\-]/g, '_');
+  if (!modelId) return json({ error: 'model_id required' }, 400);
+
+  const m = await env.DB.prepare(
+    `SELECT model_id, brand, model_number, manual_state FROM models WHERE model_id=?`
+  ).bind(modelId).first();
+  if (!m) return json({ error: 'unknown model' }, 404);
+  if (m.manual_state === 'sans_objet')
+    return json({ error: 'this model is marked "pas besoin de mode d\'emploi" — change that first' }, 409);
+
+  const bytes = await request.arrayBuffer();
+  if (bytes.byteLength < 1000) return json({ error: 'empty or tiny file' }, 400);
+  if (bytes.byteLength > 40_000_000) return json({ error: 'over 40 MB' }, 413);
+  const magic = new TextDecoder().decode(bytes.slice(0, 5));
+  if (!magic.startsWith('%PDF')) return json({ error: 'not a PDF (no %PDF header)' }, 400);
+
+  let md = '';
+  try {
+    const conv = await env.AI.toMarkdown({ name: filename,
+      blob: new Blob([bytes], { type: 'application/pdf' }) });
+    md = conv?.data || '';
+  } catch (e) {
+    return json({ error: 'conversion failed: ' + String(e).slice(0, 200) }, 502);
+  }
+
+  const canon = (m.model_number || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const report = {
+    file: filename, bytes: bytes.byteLength, chars: md.length,
+    scan_without_text: md.length < 8000,
+  };
+
+  if (report.scan_without_text && !force)
+    return json({ accepted: false, report,
+      reasons: ['almost no text came out of this PDF — it is probably a scan with no text layer. ' +
+                'It cannot be used until it is OCRed.'] }, 422);
+
+  const q = deps.qualifyManual(md, canon, filename);
+  const prov = deps.provenance(md, 'upload://' + filename);
+  report.verdict = q.verdict;
+  report.model_hits = q.model_hits;
+  report.model_form = q.model_form;
+  report.instruction_phrases = q.instruction_phrases;
+  report.pages = q.pages;
+  report.languages = Object.keys(q.language_map?.languages || {});
+  report.document_language = q.document_language?.language || null;
+  report.looks_like = prov.verdict;
+
+  if (q.verdict !== 'manual' && !force)
+    return json({ accepted: false, report, reasons: q.reasons,
+                  hint: 'If you are sure this is the right manual, send again with force=1.' }, 422);
+
+  // ---- accept: park both the PDF and its text, reset what came from the old source
+  await env.PHOTOS.put(`manuals/${modelId}.pdf`, bytes,
+    { httpMetadata: { contentType: 'application/pdf' } });
+  await env.PHOTOS.put(`manuals/${modelId}.md`, md,
+    { httpMetadata: { contentType: 'text/markdown; charset=utf-8' } });
+
+  const natives = deps.nativeLanguages(md);
+  const docLang = natives.length ? null : deps.detectLanguage(md).language;
+
+  await env.DB.prepare(
+    `UPDATE models SET manual_state='disponible', extraction='ok',
+            manuels=?, ia_meta=?, guides='{}', ia_etat='pending', ia_tentatives=0,
+            ia_erreur=NULL, ia_derniere=?, updated_at=?, updated_by=? WHERE model_id=?`
+  ).bind(
+    JSON.stringify({ source_url: 'upload://' + filename, uploaded_by: who, uploaded_at: now() }),
+    JSON.stringify({ provenance: 'upload', tier_allowed: 'auto', forced: force,
+                     pages: q.pages, chars: md.length, natives, doc_lang: docLang,
+                     looks_like: prov.verdict }),
+    now(), now(), who, modelId).run();
+
+  const phase1 = natives.length ? natives : ['en'];
+  for (const lang of phase1)
+    await env.JOBS.send({ type: 'guide', model_id: modelId, lang, whole_doc: !natives.length });
+
+  await env.DB.prepare(
+    `INSERT INTO journal (at,model_id,etape,ok,detail) VALUES (?,?,?,1,?)`
+  ).bind(now(), modelId, 'manuel_fourni', JSON.stringify({ by: who, ...report, forced: force, queued: phase1 })).run();
+
+  return json({ accepted: true, forced: force, report, queued: phase1 });
 }

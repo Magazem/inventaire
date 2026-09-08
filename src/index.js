@@ -8,12 +8,14 @@ import { probePdfHandler } from './probe.js';
 import { probeSourceHandler, probeAcquireHandler,
          acquireManual, fetchMarkdown } from './source.js';
 import { probeGuideHandler } from './guide.js';
-import { runJob } from './pipeline.js';
+import { runJob, requeueMissing, nativeLanguages } from './pipeline.js';
+import { qualifyManual } from './source.js';
+import { provenance, detectLanguage } from './probe.js';
 import { makeSession, whoami, checkPassword } from './auth.js';
 import { listsHandler, lookupHandler, photoHandler, createItemHandler,
          recentHandler, inspectHandler, photoGetHandler,
          requeueHandler, trashHandler, restoreHandler,
-         purgeHandler, editModelHandler } from './api.js';
+         purgeHandler, editModelHandler, uploadManualHandler } from './api.js';
 
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -63,6 +65,9 @@ export default {
         return purgeHandler(request, env, who);
       if (p === '/api/models/edit' && request.method === 'POST')
         return editModelHandler(request, env, who);
+      if (p === '/api/models/manual' && request.method === 'POST')
+        return uploadManualHandler(request, env, who,
+          { qualifyManual, provenance, nativeLanguages, detectLanguage });
       // P1.2 probe — session-gated because it fetches an arbitrary URL.
       if (p === '/api/probe/pdf') return probePdfHandler(request, env);
       if (p === '/api/probe/source') return probeSourceHandler(request, env);
@@ -89,7 +94,8 @@ export default {
         // A job that asks to retry (a guide waiting on its pivot) goes back
         // on the queue. Everything else is acked: the DATABASE is the truth,
         // and the daily sweep re-queues anything genuinely stranded.
-        if (r?.retry) msg.retry(); else msg.ack();
+        if (r?.retry) msg.retry(r.retry_after ? { delaySeconds: r.retry_after } : undefined);
+        else msg.ack();
       } catch (err) {
         console.error('job failed', err);
         msg.retry();
@@ -104,10 +110,13 @@ export default {
   async scheduled(event, env) {
     const stranded = await env.DB.prepare(
       `SELECT model_id FROM models
-        WHERE ia_etat = 'pending' AND ia_tentatives < 3 LIMIT 50`).all();
-    for (const row of stranded.results ?? [])
-      await env.JOBS.send({ type: 'source', model_id: row.model_id, reason: 'sweep' });
-    console.log(`sweep re-queued ${stranded.results?.length ?? 0}`);
+        WHERE ia_etat = 'pending' AND ia_tentatives < 6 LIMIT 50`).all();
+    let n = 0;
+    for (const row of stranded.results ?? []) {
+      const r = await requeueMissing(env, row.model_id);
+      n += r.queued.length;
+    }
+    console.log(`sweep re-queued ${n} job(s) for ${stranded.results?.length ?? 0} model(s)`);
   },
 };
 

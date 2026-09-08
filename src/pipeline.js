@@ -1,40 +1,45 @@
 /**
  * The pipeline — what actually runs when someone photographs a machine.
  *
- * SHAPE, AND WHY: one queue job per LANGUAGE, not one per model.
+ * SHAPE, AND WHY: one queue job per LANGUAGE, in TWO PHASES.
  *
- * Run #10 measured 75-100 s for a single guide. Seven languages in one job
- * is nine minutes, well past any sane job timeout, and a failure at language
- * six would redo all five that had already succeeded. So the work fans out:
+ *     capture -> [source] -> [guide:<native langs>] -> [translate:<the rest>]
  *
- *     capture  ->  [source]  ->  [guide:fr] [guide:en] [guide:de] ...
+ * Run #10 measured 75-100 s per guide, so seven languages in one job is nine
+ * minutes and a failure at language six redoes five successes. Hence one job
+ * per language.
  *
- * `source` runs once: find the manual, fetch it, convert it, and PARK THE
- * MARKDOWN IN R2. Each language job then reads that, so the 21 MB PDF is
- * fetched and converted once rather than seven times.
+ * Run #11 showed why it has to be two phases. STIHL HS45 is an English-only
+ * PDF. The French job ran, found no French, needed the English guide as a
+ * pivot — which did not exist yet — retried three times in the two minutes
+ * English took, and died. Translations are therefore queued only AFTER a
+ * valid pivot guide exists, by the job that wrote it.
  *
- * Every job is independently retryable, and one bad language cannot cost
- * the others. The database stays the truth (design §5.1) — the daily sweep
- * re-queues anything the free plan's 24 h message expiry loses.
+ * `source` runs once and PARKS THE MARKDOWN IN R2, so the 21 MB PDF is
+ * fetched and converted once rather than seven times. The database stays the
+ * truth (design §5.1) — the daily sweep re-queues only what is missing.
  */
 import { acquireManual, fetchMarkdown } from './source.js';
 import { sliceForLanguage, writeGuide, deriveTier, SECTIONS } from './guide.js';
 import { extractPpeFromText } from './ppe.js';
+import { pageLanguageMap, detectLanguage } from './probe.js';
 
 /** Languages generated at capture (design D25). Tigrinya waits on the manager. */
 export const TARGET_LANGS = ['fr', 'en', 'de', 'it', 'pt', 'ar'];
 
-/** The language a translation is made FROM, in order of preference. */
+/** Pivot preference for translations. English first: richest source (D25). */
 const PIVOTS = ['en', 'fr', 'de'];
 
 const now = () => new Date().toISOString();
 const mdKey = id => `manuals/${id}.md`;
 
 async function getModel(env, modelId) {
+  // ia_meta MUST be here. Run #11's first bug: it was not, so `meta` was
+  // always {}, and every native Makita guide was labelled "translated".
   return env.DB.prepare(
     `SELECT model_id, brand, model_number, type, names, manuels, guides,
             manual_state, extraction, epi, dangers, epi_source, epi_confirme,
-            ia_etat, ia_tentatives
+            ia_etat, ia_tentatives, ia_meta
        FROM models WHERE model_id = ?`).bind(modelId).first();
 }
 
@@ -44,15 +49,22 @@ async function journal(env, modelId, etape, ok, detail) {
   ).bind(now(), modelId, etape, ok ? 1 : 0, JSON.stringify(detail)).run();
 }
 
+/** Which target languages does this document carry as a REAL section? */
+export function nativeLanguages(md) {
+  const out = [];
+  for (const lang of TARGET_LANGS) if (sliceForLanguage(md, lang)) out.push(lang);
+  return out;
+}
+
+/** A guide is usable only if it exists AND passed validation. */
+const validGuide = g => g && g.sections && !g.validation;
+
+function firstValidPivot(guides) {
+  return PIVOTS.find(p => validGuide(guides[p])) || null;
+}
+
 /**
- * JOB 1 — find and park the manual.
- *
- * Ends in one of three states, all of them honest:
- *   found            -> markdown in R2, one guide job queued per language
- *   introuvable      -> D58 kicks in; the worker is told to ask the manager
- *   failed_scanned   -> a PDF exists but has no text layer. NOT `introuvable`,
- *                       because that would bury a recoverable to-do: someone
- *                       can OCR or retype it (data model §3.1).
+ * JOB 1 — find and park the manual, then queue the NATIVE languages only.
  */
 export async function jobSource(env, { model_id }) {
   const m = await getModel(env, model_id);
@@ -64,26 +76,20 @@ export async function jobSource(env, { model_id }) {
   const acq = await acquireManual(env, m.brand, m.model_number, canon);
 
   if (!acq.accepted) {
-    // Keep the EVIDENCE, not just the verdict. "None qualified" is not a
-    // diagnosis — it could mean the search found nothing, or that the right
-    // manual was found and wrongly refused. Those need opposite fixes, and
-    // without the per-candidate reasons there is no way to tell them apart
-    // after the fact.
     const why = {
-      outcome: acq.outcome,
-      at: now(),
+      outcome: acq.outcome, at: now(),
       considered: (acq.ranked || []).slice(0, 6).map(c => ({
-        url: c.url, score: c.score, title: c.title || null,
-        reasons: c.reasons })),
+        url: c.url, score: c.score, title: c.title || null, reasons: c.reasons })),
       tried: (acq.attempts || []).map(a => ({
         stage: a.stage, url: a.url, verdict: a.verdict || null,
-        reasons: a.reasons || null, pages: a.pages ?? null,
-        chars: a.chars ?? null, model_hits: a.model_hits ?? null,
-        instruction_phrases: a.instruction_phrases ?? null,
+        reasons: a.reasons || null, pages: a.pages ?? null, chars: a.chars ?? null,
+        model_hits: a.model_hits ?? null, instruction_phrases: a.instruction_phrases ?? null,
         status: a.status ?? null, links: a.links ?? null })),
     };
+    // extraction reset too — a stale "ok" from an earlier run next to
+    // "introuvable" is a contradiction (seen on Husqvarna 445 after an edit).
     await env.DB.prepare(
-      `UPDATE models SET manual_state='introuvable', ia_etat='done',
+      `UPDATE models SET manual_state='introuvable', extraction=NULL, ia_etat='done',
               ia_derniere=?, ia_erreur=?, ia_meta=?, updated_at=? WHERE model_id=?`
     ).bind(now(), acq.outcome, JSON.stringify(why), now(), model_id).run();
     await journal(env, model_id, 'source_introuvable', false, why);
@@ -94,8 +100,7 @@ export async function jobSource(env, { model_id }) {
   if (!md || md.length < 8000) {
     await env.DB.prepare(
       `UPDATE models SET manual_state='a_rediger', extraction='failed_scanned',
-              ia_etat='done', ia_derniere=?, ia_erreur=?, updated_at=?
-       WHERE model_id=?`
+              ia_etat='done', ia_derniere=?, ia_erreur=?, updated_at=? WHERE model_id=?`
     ).bind(now(), 'no text layer — needs OCR or retyping', now(), model_id).run();
     await journal(env, model_id, 'source_no_text', false, { url: acq.accepted.url });
     return { ok: true, state: 'failed_scanned' };
@@ -104,97 +109,48 @@ export async function jobSource(env, { model_id }) {
   await env.PHOTOS.put(mdKey(model_id), md,
     { httpMetadata: { contentType: 'text/markdown; charset=utf-8' } });
 
+  const natives = nativeLanguages(md);
+  const docLang = natives.length ? null : detectLanguage(md).language;
+
   await env.DB.prepare(
     `UPDATE models SET manual_state='disponible', extraction='ok',
-            manuels=?, ia_meta=?, ia_derniere=?, updated_at=? WHERE model_id=?`
+            manuels=?, ia_meta=?, ia_etat='pending', ia_derniere=?, updated_at=?
+      WHERE model_id=?`
   ).bind(
     JSON.stringify({ source_url: acq.accepted.url }),
     JSON.stringify({ provenance: acq.accepted.provenance,
                      tier_allowed: acq.accepted.trust_tier_allowed,
                      pages: acq.accepted.qualification?.pages ?? null,
-                     chars: md.length }),
+                     chars: md.length, natives, doc_lang: docLang }),
     now(), now(), model_id).run();
 
-  for (const lang of TARGET_LANGS)
-    await env.JOBS.send({ type: 'guide', model_id, lang });
+  // Phase 1: native languages. If the document carries NONE of our targets
+  // (a Dutch-only manual, say), write English from the whole document as
+  // the pivot — an LLM can write English from Dutch text; that is the one
+  // job it is here for.
+  const phase1 = natives.length ? natives : ['en'];
+  for (const lang of phase1)
+    await env.JOBS.send({ type: 'guide', model_id, lang,
+                          whole_doc: !natives.length });
 
   await journal(env, model_id, 'source_ok', true,
     { url: acq.accepted.url, provenance: acq.accepted.provenance,
-      chars: md.length, queued: TARGET_LANGS.length });
-  return { ok: true, state: 'disponible', queued: TARGET_LANGS };
+      chars: md.length, natives, doc_lang: docLang, queued: phase1 });
+  return { ok: true, state: 'disponible', natives, queued: phase1 };
 }
 
-/**
- * JOB 2 — write ONE guide, in ONE language.
- *
- * Native where the manual carries that language, translated where it does
- * not — and the difference is recorded, never blurred, because the trust
- * tier shown to a worker depends on it (D44/D45).
- */
-export async function jobGuide(env, { model_id, lang }) {
-  const m = await getModel(env, model_id);
-  if (!m) return { ok: false, reason: 'model gone' };
-
-  const obj = await env.PHOTOS.get(mdKey(model_id));
-  if (!obj) return { ok: false, reason: 'no parked manual — re-run source' };
-  const md = await obj.text();
-
-  const meta = JSON.parse(m.ia_meta || '{}');
+/** Shared tail: store one guide, update rollups, journal it. */
+async function storeGuide(env, m, lang, result, origin) {
   const guides = JSON.parse(m.guides || '{}');
-  const manuels = JSON.parse(m.manuels || '{}');
-
-  const slice = sliceForLanguage(md, lang);
-  let result, origin;
-
-  if (slice) {
-    result = await writeGuide(env, { text: slice.text, lang,
-                                     brand: m.brand, model: m.model_number });
-    origin = {
-      method: meta.tier_allowed === 'native' ? 'native' : 'translated',
-      from_lang: null,
-      source_url: manuels.source_url || null,
-      tier_source: meta.provenance === 'manufacturer' ? 1 : 2,
-      pattern: slice.method === 'page_headers' ? 'A' : 'B',
-      pages: slice.pages || null,
-    };
-  } else {
-    // The manual does not carry this language. Translate from a guide we
-    // already have — never from the raw manual in another language, which
-    // would be a second translation of an already-translated text.
-    const pivot = PIVOTS.find(p => guides[p]?.sections);
-    if (!pivot)
-      return { ok: false, reason: `no ${lang} in the manual and no pivot guide yet`,
-               retry: true };
-    const pivotText = SECTIONS
-      .map(k => `[${k}]\n` + (guides[pivot].sections[k] || []).join('\n'))
-      .join('\n\n');
-    result = await writeGuide(env, { text: pivotText, lang,
-                                     brand: m.brand, model: m.model_number });
-    origin = {
-      method: 'translated', from_lang: pivot,
-      source_url: manuels.source_url || null,
-      tier_source: meta.provenance === 'manufacturer' ? 1 : 2,
-      pattern: null, pages: null,
-    };
-  }
-
-  if (!result.ok && !result.sections) {
-    await bumpFailure(env, model_id, `${lang}: ${result.reason || 'validation'}`);
-    return { ok: false, reason: result.reason, lang };
-  }
-
   guides[lang] = {
     sections: result.sections,
     tier: deriveTier({ origin, checks: [], verified_by: null }),
-    origin,
-    checks: [],
-    verified_by: null, verified_at: null,
-    edited_by: null, edited_at: null,
-    validation: result.validation?.problems?.length ? result.validation.problems : null,
+    origin, checks: [],
+    verified_by: null, verified_at: null, edited_by: null, edited_at: null,
   };
 
-  // PPE comes from the FRENCH guide — one language, so the pictograms are
-  // decided once rather than drifting between translations.
+  // PPE from the FRENCH guide only — decided once, so pictograms cannot
+  // drift between translations.
   let ppeSql = '', ppeArgs = [];
   if (lang === 'fr' && !m.epi_confirme) {
     const safety = [...(result.sections.securite || []), ...(result.sections.usage || []),
@@ -205,30 +161,158 @@ export async function jobGuide(env, { model_id, lang }) {
     ppeArgs = [JSON.stringify(ppe.epi), JSON.stringify(ppe.dangers), ppe.source];
   }
 
-  const done = TARGET_LANGS.every(l => guides[l]);
+  const done = TARGET_LANGS.every(l => validGuide(guides[l]));
   await env.DB.prepare(
-    `UPDATE models SET guides=?${ppeSql}, ia_etat=?, ia_derniere=?, updated_at=?
-      WHERE model_id=?`
+    `UPDATE models SET guides=?${ppeSql}, ia_etat=?, ia_erreur=NULL, ia_derniere=?,
+            updated_at=? WHERE model_id=?`
   ).bind(JSON.stringify(guides), ...ppeArgs,
-         done ? 'done' : 'pending', now(), now(), model_id).run();
-
-  await journal(env, model_id, `guide_${lang}`, true,
-    { tier: guides[lang].tier, method: origin.method, from: origin.from_lang,
-      problems: guides[lang].validation });
-  return { ok: true, lang, tier: guides[lang].tier };
+         done ? 'done' : 'pending', now(), now(), m.model_id).run();
+  return guides;
 }
 
-async function bumpFailure(env, modelId, err) {
+/**
+ * Failure bookkeeping. Keeps the HTTP status, because "http" alone told us
+ * nothing in run #11. Returns a retry delay for the kinds of failure that
+ * are the provider's problem rather than ours.
+ */
+async function recordFailure(env, modelId, lang, result) {
+  const status = result.status ?? null;
+  const detail = `${lang}: ${result.reason}` +
+    (status ? ` ${status}` : '') +
+    (result.error ? ` — ${String(result.error).slice(0, 160)}` : '') +
+    (result.validation?.problems?.length ? ` — ${result.validation.problems.join('; ')}` : '');
   await env.DB.prepare(
     `UPDATE models SET ia_tentatives = ia_tentatives + 1, ia_etat='pending',
             ia_derniere=?, ia_erreur=? WHERE model_id=?`
-  ).bind(now(), String(err).slice(0, 300), modelId).run();
+  ).bind(now(), detail.slice(0, 400), modelId).run();
+  await journal(env, modelId, `guide_${lang}_failed`, false,
+                { reason: result.reason, status, error: String(result.error || '').slice(0, 200),
+                  problems: result.validation?.problems || null });
+  // 429 and 5xx: back off, do not hammer. Everything else: normal retry.
+  const retryAfter = status === 429 ? 120 : (status >= 500 ? 60 : null);
+  return { ok: false, lang, reason: result.reason, status, retry: true, retry_after: retryAfter };
+}
+
+/**
+ * JOB 2 — write ONE guide in ONE language from the manual itself.
+ * On success, if this is the first valid pivot, queue phase 2.
+ */
+export async function jobGuide(env, { model_id, lang, whole_doc }) {
+  const m = await getModel(env, model_id);
+  if (!m) return { ok: false, reason: 'model gone' };
+  const obj = await env.PHOTOS.get(mdKey(model_id));
+  if (!obj) return { ok: false, reason: 'no parked manual — re-run source' };
+  const md = await obj.text();
+  const meta = JSON.parse(m.ia_meta || '{}');
+  const manuels = JSON.parse(m.manuels || '{}');
+
+  let text, method, pages = null, fromLang = null;
+  if (whole_doc) {
+    text = md; method = 'whole_document'; fromLang = meta.doc_lang || null;
+  } else {
+    const slice = sliceForLanguage(md, lang);
+    if (!slice) return { ok: false, reason: `no usable ${lang} section` };
+    text = slice.text; method = slice.method; pages = slice.pages || null;
+  }
+
+  const result = await writeGuide(env, { text, lang, brand: m.brand, model: m.model_number });
+  if (!result.ok) return recordFailure(env, model_id, lang, result);
+
+  const native = !whole_doc && meta.tier_allowed === 'native';
+  const origin = {
+    method: native ? 'native' : 'translated',
+    from_lang: whole_doc ? fromLang : null,
+    source_url: manuels.source_url || null,
+    tier_source: meta.provenance === 'manufacturer' ? 1 : 2,
+    pattern: method === 'page_headers' ? 'A' : 'B',
+    pages,
+  };
+  const guides = await storeGuide(env, m, lang, result, origin);
+  await journal(env, model_id, `guide_${lang}`, true,
+    { tier: guides[lang].tier, method: origin.method, from: origin.from_lang, pages });
+
+  // Phase 2, exactly once: the first valid pivot queues every missing language.
+  const pivot = firstValidPivot(guides);
+  let queued = [];
+  if (pivot === lang) {
+    const natives = meta.natives || [];
+    queued = TARGET_LANGS.filter(l => l !== lang && !validGuide(guides[l]) && !natives.includes(l));
+    for (const l of queued) await env.JOBS.send({ type: 'translate', model_id, lang: l, from: lang });
+    if (queued.length) await journal(env, model_id, 'translations_queued', true, { from: lang, langs: queued });
+  }
+  return { ok: true, lang, tier: guides[lang].tier, queued_translations: queued };
+}
+
+/**
+ * JOB 3 — translate ONE language from a VALID pivot guide.
+ * Never from the raw manual in another language: that would be a
+ * translation of a translation.
+ */
+export async function jobTranslate(env, { model_id, lang, from }) {
+  const m = await getModel(env, model_id);
+  if (!m) return { ok: false, reason: 'model gone' };
+  const guides = JSON.parse(m.guides || '{}');
+  if (validGuide(guides[lang])) return { ok: true, lang, skipped: 'already present' };
+
+  const pivot = validGuide(guides[from]) ? from : firstValidPivot(guides);
+  if (!pivot) return { ok: false, reason: 'no valid pivot guide', retry: true, retry_after: 90 };
+
+  const meta = JSON.parse(m.ia_meta || '{}');
+  const manuels = JSON.parse(m.manuels || '{}');
+  const pivotText = SECTIONS
+    .map(k => `[${k}]\n` + (guides[pivot].sections[k] || []).join('\n')).join('\n\n');
+
+  const result = await writeGuide(env, { text: pivotText, lang, brand: m.brand, model: m.model_number });
+  if (!result.ok) return recordFailure(env, model_id, lang, result);
+
+  const origin = {
+    method: 'translated', from_lang: pivot,
+    source_url: manuels.source_url || null,
+    tier_source: meta.provenance === 'manufacturer' ? 1 : 2,
+    pattern: null, pages: null,
+  };
+  const g = await storeGuide(env, m, lang, result, origin);
+  await journal(env, model_id, `guide_${lang}`, true,
+    { tier: g[lang].tier, method: 'translated', from: pivot });
+  return { ok: true, lang, tier: g[lang].tier, from: pivot };
+}
+
+/**
+ * The sweep's helper: what does this model still need?
+ * Re-sourcing is only for models with nothing parked. Run #11's sweep
+ * re-fetched Makita from scratch and rewrote five good guides to chase one.
+ */
+export async function requeueMissing(env, model_id) {
+  const m = await getModel(env, model_id);
+  if (!m || m.manual_state === 'sans_objet') return { queued: [] };
+  const parked = await env.PHOTOS.head(mdKey(model_id));
+  if (!parked || m.manual_state !== 'disponible') {
+    await env.JOBS.send({ type: 'source', model_id, reason: 'sweep' });
+    return { queued: ['source'] };
+  }
+  const guides = JSON.parse(m.guides || '{}');
+  const meta = JSON.parse(m.ia_meta || '{}');
+  const natives = meta.natives || [];
+  const pivot = firstValidPivot(guides);
+  const queued = [];
+  for (const l of TARGET_LANGS) {
+    if (validGuide(guides[l])) continue;
+    if (natives.includes(l)) { await env.JOBS.send({ type: 'guide', model_id, lang: l }); queued.push('guide:' + l); }
+    else if (pivot) { await env.JOBS.send({ type: 'translate', model_id, lang: l, from: pivot }); queued.push('translate:' + l); }
+  }
+  if (!queued.length && !pivot) {
+    // nothing native and no pivot: make English from the whole document
+    await env.JOBS.send({ type: 'guide', model_id, lang: 'en', whole_doc: true });
+    queued.push('guide:en(whole)');
+  }
+  return { queued };
 }
 
 /** Dispatch. Unknown job types are acked, not retried forever. */
 export async function runJob(env, body) {
   const type = body?.type || (body?.model_id ? 'source' : null);
-  if (type === 'source') return jobSource(env, body);
-  if (type === 'guide')  return jobGuide(env, body);
+  if (type === 'source')    return jobSource(env, body);
+  if (type === 'guide')     return jobGuide(env, body);
+  if (type === 'translate') return jobTranslate(env, body);
   return { ok: true, ignored: type };
 }

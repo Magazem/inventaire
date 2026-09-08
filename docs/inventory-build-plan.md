@@ -639,6 +639,86 @@ always for.
 
 ---
 
+### P1.2 RUN #11 — 8 Sep 2026: first real capture session, 17 machines, two people
+
+Read directly from D1 after Yazan and Walid captured for an hour.
+
+| Outcome | Machines |
+|---|---|
+| Manual found, **manufacturer** | Makita GA5030R · STIHL HSA 45 (`ssc.stihl.com`) · Husqvarna 445 (`www-static-nw.husqvarna.com`, later lost — see below) |
+| Manual found, third party | Maxx PN13150 · Fuxtec FX-EB162 · STIHL HS45 · STIHL FS 260C |
+| `introuvable` | Honda HRH536 · Kraftronic · Black & Decker CD14C · Spacy M0320 · STIHL BG86, FS86, MS180 · Fiskars UPX86 |
+| `sans_objet` | 2 |
+
+**Six defects found, four of them mine.**
+
+**1. Every native guide was labelled `translated` / `auto`.** Makita's French
+was written from Makita's own French pages and should be `native`,
+`tier_source: 1`. `getModel()` did not SELECT `ia_meta`, so the provenance
+stored by `source` was never read — `meta` was always `{}`. Under-claims
+rather than over-claims, so no worker ever saw a false badge, but every
+source line was wrong the other way. One-line fix.
+
+**2. STIHL HSA 45: six empty guides, five of them translated from the
+first.** The page-header map found "FRANÇAIS" at **pages 49–51 of 52** —
+three pages of multilingual back-matter (declaration of conformity,
+addresses), not the manual. The model correctly said there was nothing
+there. The empty guide was then STORED, and the English job — finding no
+English section — picked it as the pivot. Garbage, translated five times.
+
+=> **D62**: a language section under **6 pages / 6 000 chars** is not that
+language's manual; the language counts as absent and is translated from a
+real pivot. **D63**: a guide that fails validation is never stored, and a
+guide with recorded problems is never a pivot.
+
+**3. Translation jobs raced their own pivot.** STIHL HS45 is an English-only
+PDF. The French job found no French, needed the English guide, which did not
+exist yet, retried three times inside the two minutes English took, and
+died. Result: `en` only.
+
+=> **D64: two-phase fan-out.** `source` queues only the languages the
+document actually carries. The job that writes the first valid pivot queues
+`translate` jobs for the rest. Translations cannot run before their source
+exists, by construction.
+
+**4. `"pt: http"`.** LongCat returned a non-200 and only the word "http" was
+stored. Status and error snippet are now kept; 429 retries after 120 s, 5xx
+after 60 s, through the queue's own delay rather than a hot loop.
+
+**5. The 03:00 sweep re-sourced Makita from scratch** and rewrote five good
+guides to chase one missing language. `requeueMissing()` now queues only
+what is absent, and re-fetches only when nothing is parked. The
+"Relancer" button on `/inspect` uses the same logic.
+
+**6. STIHL MS180 — a genuine 44-page manual, model named 40× — was rejected
+as a parts diagram** because its body says *"use only STIHL spare parts"*,
+as every STIHL manual does. The filter added after the Honda run was too
+eager. Split into STRONG signals (`vue éclatée`, `exploded view`, `parts
+list`…, counted anywhere) and WEAK ones (`spare parts`, `Ersatzteil`,
+counted in URL/title only), and rejection now also needs a number-heavy body
+(digit/letter ratio > 0.12 — the MS180 manual is 0.03, a real parts diagram
+is 2.1).
+
+**One user-side finding.** Husqvarna 445's manufacturer manual WAS found.
+Then the model number was edited to `445 CHAINSAW`, the canonical key became
+`445CHAINSAW`, and that string appears in no manual on earth — every
+candidate was rejected for "model number never appears". The model-number
+field wants only what is on the nameplate. `extraction: ok` was also left
+standing next to `introuvable`; now reset together.
+
+**Pilot finding for P2, not a bug:** free-text types produced `MACHINE` ×5,
+`MACHAINE`, `TAILLEUR`, `SOUFLEUR` and `SOUFFLEUSE` for the same thing,
+`CORDLESS_DRILL` beside `VISSEUSE`. Two people, one hour. The type field
+needs a curated list with suggestions, and a merge tool, before bulk capture
+— exactly the kind of flaw P2 exists to find at 20 items rather than 400.
+
+**Sourcing hit rate this session: 7 of 15 with a model number (47%),
+3 of them manufacturer-grade.** STIHL is a third of the fleet and 2 of 6
+found; the found ones came from `ssc.stihl.com` by part number, which is not
+derivable from the model. A STIHL rule is worth an hour before P3.
+
+---
+
 ## P1 — Foundations
 
 **Entry:** ✔ all clear. P0.1 closed, P0.2 passed (bar Tigrinya), P0.3 done, 1.1 frozen. **Nothing blocks P1.2.**

@@ -86,6 +86,13 @@ export function inspectPage() {
   .warn{color:var(--warn);font-size:12px;margin-top:6px}
   .bin{background:var(--card);border:1px solid var(--bad);border-radius:10px;
     padding:12px;margin-bottom:14px}
+  .up{margin-top:10px;font-size:13px}
+  .up summary{cursor:pointer;color:var(--accent);font-weight:600}
+  .up input[type=file]{font:inherit;margin-top:8px;max-width:100%}
+  .up .report{margin-top:8px;font-size:12px;white-space:pre-wrap;
+    font-family:ui-monospace,monospace;color:var(--muted)}
+  .up .report.bad{color:var(--bad)}
+  .up .report.good{color:var(--good)}
 </style>
 <header>
   <h1>Inventaire — contrôle</h1>
@@ -138,7 +145,61 @@ document.addEventListener('click', e => {
   if (rs) { restore(rs.getAttribute('data-kind'), rs.getAttribute('data-restore')); return; }
   const sv = e.target.closest('[data-save]');
   if (sv) { saveEdit(sv.getAttribute('data-save')); return; }
+  const upb = e.target.closest('[data-upload]');
+  if (upb) { uploadManual(upb.getAttribute('data-upload'), upb.hasAttribute('data-force')); return; }
 });
+
+/**
+ * Send a PDF the person found themselves. The server runs the SAME check
+ * it runs on anything the search finds, and says yes or no with reasons.
+ * "Forcer" is only offered after a refusal, and the override is recorded.
+ */
+// No escape sequences in strings on this page: the outer template literal
+// eats the backslash. A newline is built, not written.
+const NL = String.fromCharCode(10);
+
+async function uploadManual(id, force){
+  const box = document.getElementById('up-' + id);
+  const inp = box.querySelector('input[type=file]');
+  const rep = box.querySelector('.report');
+  const f = inp.files && inp.files[0];
+  if (!f) { rep.textContent = 'Choisir un fichier PDF d abord.'; rep.className = 'report bad'; return; }
+  rep.className = 'report'; rep.textContent = 'Verification en cours (' + Math.round(f.size/1024) + ' Ko)...';
+  const q = '?model_id=' + encodeURIComponent(id) + '&name=' + encodeURIComponent(f.name) + (force ? '&force=1' : '');
+  const r = await fetch('/api/models/manual' + q, { method: 'POST',
+    headers: { 'content-type': 'application/pdf' }, body: f });
+  const d = await r.json();
+  if (d.accepted) {
+    rep.className = 'report good';
+    rep.textContent = 'ACCEPTE' + (d.forced ? ' (force)' : '') + ' - ' + fmtReport(d.report) +
+      NL + 'Langues lancees : ' + (d.queued||[]).join(', ') + '. Recharger dans deux minutes.';
+    box.querySelector('[data-force]').hidden = true;
+    setTimeout(load, 2500);
+  } else {
+    rep.className = 'report bad';
+    rep.textContent = 'REFUSE - ' + (d.reasons || [d.error]).join(' / ') +
+      (d.report ? NL + fmtReport(d.report) : '');
+    if (d.report && !d.report.scan_without_text) box.querySelector('[data-force]').hidden = false;
+  }
+}
+function fmtReport(r){
+  if (!r) return '';
+  return (r.pages||0) + ' pages, ' + Math.round((r.chars||0)/1000) + 'k car., modele nomme x' +
+    (r.model_hits||0) + (r.model_form ? ' (' + r.model_form + ')' : '') + ', ' +
+    (r.instruction_phrases||0) + ' phrases d instruction, langues : ' +
+    ((r.languages||[]).join(', ') || r.document_language || '?') + '. ' + (r.looks_like||'');
+}
+
+function uploadBlock(m){
+  if (m.corbeille || m.manual_state === 'sans_objet') return '';
+  const label = m.manual_state === 'disponible'
+    ? 'Remplacer le PDF du mode d emploi' : 'Joindre le PDF du mode d emploi';
+  return '<details class="up" id="up-' + esc(m.model_id) + '"><summary>' + label + '</summary>' +
+    '<input type="file" accept="application/pdf,.pdf">' +
+    '<div class="acts"><button data-upload="' + esc(m.model_id) + '">Verifier et joindre</button>' +
+    '<button class="danger" data-upload="' + esc(m.model_id) + '" data-force hidden>Forcer l acceptation</button></div>' +
+    '<div class="report"></div></details>';
+}
 
 const post = (url, body) => fetch(url, { method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -302,6 +363,7 @@ async function load(){
         '</div>' +
         tagsFor(m) +
         editBlock(m) +
+        uploadBlock(m) +
         actionRow(m) +
         (us.length ? '<div class="units">Exemplaires : ' +
            us.map(u => '<span' + (u.corbeille ? ' style="text-decoration:line-through;opacity:.6"' : '') +

@@ -351,12 +351,17 @@ const SALES_PHRASES = ['rrp', 'recommended retail', 'prix conseillé', 'incl. va
  * on instructions. It should be refused for what it IS: a parts diagram is
  * not a weak manual, it is a different kind of document.
  */
-const PARTS_WORDS = [
-  'vue eclatee', 'vue éclatée', 'pieces detachees', 'pièces détachées',
-  'exploded view', 'parts list', 'parts catalog', 'parts catalogue',
-  'illustrated part', 'spare parts', 'ersatzteil', 'explosionszeichnung',
-  'lista ricambi', 'despiece', 'catalogo de pecas', 'part number index',
+// STRONG signals: a document ABOUT parts. Counted in URL, title and text.
+const PARTS_STRONG = [
+  'vue eclatee', 'pieces detachees', 'exploded view', 'parts list',
+  'parts catalog', 'parts catalogue', 'illustrated part', 'explosionszeichnung',
+  'ersatzteilliste', 'lista ricambi', 'despiece', 'catalogo de pecas',
+  'part number index', 'ipl',
 ];
+// WEAK signals: appear in the BODY of nearly every real manual — STIHL says
+// "use only STIHL spare parts" in every edition, and the MS180 manual was
+// thrown out for it (44 pages, model named 40×). Counted in URL/title ONLY.
+const PARTS_WEAK = ['spare parts', 'ersatzteil', 'pieces de rechange', 'ricambi'];
 
 /**
  * How a French mower manual actually talks.
@@ -380,19 +385,71 @@ const EXTRA_INSTRUCTION_PHRASES = [
   'normas de seguridad', 'antes de usar',
 ];
 
+/**
+ * Does this text name this model? — the way manufacturers actually write it.
+ *
+ * STIHL ships one manual for a family and titles it "BG 56, 66, 86" or
+ * "MS 170, 180". Canonicalising that to BG566686 and searching for BG86
+ * finds nothing, and the real manual is refused for "model number never
+ * appears" with the number sitting in the title. Yazan checked the paper
+ * manual in the box: it was always printed this way. This is not an
+ * aggregator merging documents; it is how the manufacturer publishes.
+ *
+ * Three forms are tried, and the one that matched is reported:
+ *   exact    BG86C  (the canonical key, as before)
+ *   core     BG86   (letters + first digit run, suffix dropped: /C, -E, R…)
+ *   family   BG … 86 (the letter prefix, then the number within a short run
+ *                    of non-letter characters — commas, slashes, spaces)
+ */
+export function modelMentions(md, rawModel) {
+  const canon = String(rawModel || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!canon) return { hits: 0, form: null };
+  const canonText = md.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  const count = (hay, needle) => needle ? hay.split(needle).length - 1 : 0;
+
+  const exact = count(canonText, canon);
+  if (exact) return { hits: exact, form: 'exact', key: canon };
+
+  const m = canon.match(/^([A-Z]+)(\d+)/);
+  if (!m) return { hits: 0, form: null, key: canon };
+  const [, prefix, digits] = m;
+  const core = prefix + digits;
+
+  if (core !== canon) {
+    const c = count(canonText, core);
+    if (c) return { hits: c, form: 'core', key: core };
+  }
+
+  // Family enumeration on the raw text: "BG 56, 66, 86" / "MS 170/180".
+  // The digits must be a whole number (no "86" inside "586"), and only
+  // non-letters may sit between prefix and number so "BG … 86" cannot
+  // reach across into a different model line.
+  const fam = new RegExp('\\b' + prefix + '\\b[^A-Za-z]{0,40}?\\b' + digits + '\\b', 'g');
+  const f = (md.match(fam) || []).length;
+  if (f) return { hits: f, form: 'family', key: `${prefix} … ${digits}` };
+
+  return { hits: 0, form: null, key: canon };
+}
+
 export function qualifyManual(md, canonModel, url = '') {
   const lower = md.toLowerCase();
   const flatText = flat(md.slice(0, 200_000));
   const flatUrl = flat(url);
-  const canonText = md.toUpperCase().replace(/[^A-Z0-9]/g, '');
-  const modelHits = canonModel
-    ? (canonText.split(canonModel).length - 1) : 0;
+  const mention = modelMentions(md, canonModel);
+  const modelHits = mention.hits;
 
   const instruction = [
     ...INSTRUCTION_PHRASES.filter(p => lower.includes(p)),
     ...EXTRA_INSTRUCTION_PHRASES.filter(p => flatText.includes(flat(p))),
   ];
-  const parts = PARTS_WORDS.filter(p => flatUrl.includes(flat(p)) || flatText.includes(flat(p)));
+  const parts = [
+    ...PARTS_STRONG.filter(p => flatUrl.includes(flat(p)) || flatText.includes(flat(p))),
+    ...PARTS_WEAK.filter(p => flatUrl.includes(flat(p))),
+  ];
+  // A parts diagram is mostly numbers. A manual is mostly words.
+  const digits = (md.match(/\d/g) || []).length;
+  const letters = (md.match(/\p{L}/gu) || []).length || 1;
+  const digitRatio = digits / letters;
   const sales = SALES_PHRASES.filter(p => lower.includes(p));
   const map = pageLanguageMap(md);
   const pages = map.total_pages || 0;
@@ -405,9 +462,12 @@ export function qualifyManual(md, canonModel, url = '') {
   let verdict = 'manual';
   if (modelHits === 0) { verdict = 'reject'; reasons.push('the model number never appears in the text'); }
   // A parts diagram names the model constantly and instructs on nothing.
-  if (parts.length && instruction.length < 6) {
+  // Needs a parts signal AND thin instructions AND a number-heavy body —
+  // any one alone is not enough, which is what run #11 taught.
+  if (parts.length && instruction.length < 4 && digitRatio > 0.12) {
     verdict = 'reject';
-    reasons.push(`parts catalogue / exploded view (${parts.slice(0, 2).join(', ')})`);
+    reasons.push(`parts catalogue / exploded view (${parts.slice(0, 2).join(', ')}; ` +
+                 `digit ratio ${digitRatio.toFixed(2)})`);
   }
   if (instruction.length < 3) { verdict = 'reject'; reasons.push(`only ${instruction.length} instruction phrases`); }
   if (md.length < 8000) { verdict = 'reject'; reasons.push('too short to be a manual'); }
@@ -422,11 +482,13 @@ export function qualifyManual(md, canonModel, url = '') {
   return {
     verdict, reasons,
     parts_signals: parts,
+    digit_ratio: +digitRatio.toFixed(3),
     instruction_matched: instruction.slice(0, 6),
     structure: (map.coverage || 0) >= 0.3
       ? 'multilingual, page-labelled' : 'single-language (or unlabelled)',
     document_language: detected,
     model_hits: modelHits,
+    model_form: mention.form,        // exact | core | family — how it was named
     instruction_phrases: instruction.length,
     sales_phrases: sales,
     chars: md.length,
@@ -492,7 +554,8 @@ export async function acquireManual(env, brandRaw, modelRaw, canonModel, opts = 
     attempts.push({ stage: 'qualify', url: c.url, score: c.score, via: c.via,
                     provenance: c.provenance,
                     verdict: q.verdict, reasons: q.reasons,
-                    model_hits: q.model_hits, pages: q.pages, chars: q.chars,
+                    model_hits: q.model_hits, model_form: q.model_form,
+                    pages: q.pages, chars: q.chars,
                     instruction_phrases: q.instruction_phrases,
                     instruction_matched: q.instruction_matched,
                     parts_signals: q.parts_signals,
