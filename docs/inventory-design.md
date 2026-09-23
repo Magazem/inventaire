@@ -742,8 +742,11 @@ Flash and Flash-Lite only (Pro is behind billing); roughly 10 RPM and
 the whole inventory, the free tier is about two days of background work;
 paid Flash would be a few euros and no cap — free first.
 
-**Terms, stated plainly.** On the free tier Google may use prompts and
-outputs to improve its models; paid tiers do not. What is sent is
+**Terms, stated plainly.** *(Superseded the same day: billing was enabled
+at 15:00 on 23 Sep, so the project is on the paid tier — no training on
+prompts, no daily caps. The free-tier reasoning below stands as the record
+of what was accepted before that.)* On the free tier Google may use prompts
+and outputs to improve its models; paid tiers do not. What is sent is
 manufacturer manual text and the guides derived from it — public documents,
 no names, no photos, no unit IDs. Acceptable for this data. The EU boundary
 built for R2 photos never extended to the model provider; LongCat was in

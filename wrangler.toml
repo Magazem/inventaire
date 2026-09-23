@@ -35,7 +35,7 @@ queue               = "inventaire-jobs"
 max_batch_size      = 1
 max_batch_timeout   = 5
 max_retries         = 3
-max_concurrency     = 3   # 3.5 Flash Lite: 15 req/min, 500/day on this project; 429s back off 120 s
+max_concurrency     = 6   # Gemini paid tier (23 Sep): daily caps gone; 429s still back off 120 s
 
 # Daily sweep for stranded jobs
 [triggers]
@@ -46,7 +46,7 @@ SCHEMA_VERSION = "1"
 # The LLM is configuration. LongCat was retired mid-project (Sep 2026) and
 # the swap to Gemini's OpenAI-compatible endpoint was these lines plus one
 # secret. Keep it that way. Free tier: ~10 RPM / 1 500 RPD per model, and
-# Google may train on free-tier prompts (D68) — manual text only, no photos.
+# Paid tier since 23 Sep 2026: no training on prompts, no daily caps (D68).
 LLM_BASE_URL        = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 LLM_MODEL_WRITE     = "gemini-3.5-flash"        # 20/day here, but ~90 native writes total; Lite wrote 6 safety items where Flash writes 20
 LLM_MODEL_TRANSLATE = "gemini-3.5-flash-lite"   # 500/day, 0.7 s/call, passed the ladder (D69)
