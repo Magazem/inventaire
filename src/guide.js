@@ -164,7 +164,10 @@ async function callLongCat(env, { system, user, schema, maxTokens = 4000,
         // per-call choice, and the probe can measure both.
         // OpenAI-style knob; Gemini's compat layer maps it onto its
         // thinking budget. 'none' is what LongCat's `thinking: disabled` was.
-        reasoning_effort: thinking ? 'medium' : 'none',
+        // Sent only when reasoning is wanted. Lite and Gemma models reject
+        // the parameter outright (400 "invalid argument"), and they are the
+        // ones with usable free quota: 3.5 Flash is 20 requests/DAY.
+        ...(thinking ? { reasoning_effort: 'medium' } : {}),
         messages: [{ role: 'system', content: system },
                    { role: 'user', content: user }],
         response_format: { type: 'json_schema', json_schema: schema },
@@ -571,7 +574,7 @@ export async function probeLlmHandler(request, env) {
     const r = await fetch(cfg.url.replace(/\/chat\/completions$/, '/models'),
       { headers: { authorization: `Bearer ${cfg.key}` } });
     const d = await r.json().catch(() => ({}));
-    const ids = (d.data || []).map(m => m.id).filter(id => /flash|lite|gemini/i.test(id)).sort();
+    const ids = (d.data || []).map(m => m.id).filter(id => /flash|lite|gemma/i.test(id) && !/image|tts|live|audio|robotics|transcribe|omni|veo/i.test(id)).sort();
     return json({ status: r.status, models: ids, raw: ids.length ? undefined : d });
   }
   const schema = { name: 'n', strict: true, schema: {

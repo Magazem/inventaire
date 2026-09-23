@@ -754,3 +754,30 @@ Gemini gets the same ladder, automated at `/api/probe/llm` — five identical
 runs, the hostile prompt, an enum under pressure, and the reasoning switch
 measured — and the pipeline is not re-queued until it reports PASS.
 
+
+### D69 — Gemini 3.5 Flash passes the enforcement ladder; Lite does not (23 Sep 2026)
+
+`/api/probe/llm`, live, from the deployed Worker:
+
+```
+gemini-3.5-flash
+  A  five runs     {"nums":[1,2,3]} ×5, byte-identical
+  B  hostile       "200 words of prose + a notes field" -> {"nums":[1,2,3,4,5]}, 1.2 s
+  C  enum          hard hat / boots / hi-vis vs gloves|glasses|mask -> {"epi": []}
+  D  reasoning     on: 170 tokens for a 7-token answer · off: 36  — the switch is real
+                                                                     -> PASS
+gemini-3.5-flash-lite   400 "invalid argument" on every call         -> unusable
+gemini-3.1-flash-lite   shape held, but "write 200 words" produced numbers until
+                        max_tokens cut the array mid-way              -> not trusted
+```
+
+Test C is the one that matters most for this project: asked to list
+equipment that is NOT in the enum, the model returned an empty list rather
+than inventing `casque`. That is D52 working on a new provider.
+
+Consequences: both roles run on `gemini-3.5-flash`; one free quota
+(~1 500 requests/day) is enough — the backlog is a day and a half of
+background work. Model ids published anywhere were stale within weeks;
+`?list=1` asks the provider directly and is the only source to trust.
+The old research figures (2.5-generation ids, RPD tables) are void.
+
