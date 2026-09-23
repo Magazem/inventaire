@@ -597,7 +597,10 @@ export async function probeLlmHandler(request, env) {
     const r = await run('List the numbers one two three.', schema, false);
     A.push(r.ok ? r.content : `ERR ${r.stop} ${r.status || ''} ${r.error || ''}`.trim());
   }
-  out.A_five_runs = { all_identical: new Set(A).size === 1, outputs: A };
+  // Compare PARSED values, not bytes: Gemini pretty-prints some responses
+  // and not others, and whitespace is not a determinism failure.
+  const canon = x => { try { return JSON.stringify(JSON.parse(x)); } catch { return 'ERR:' + x; } };
+  out.A_five_runs = { all_identical: new Set(A.map(canon)).size === 1, outputs: A };
 
   // B — hostile: prose and a forbidden field demanded
   const B = await run('Explain in detail how to use a drill, with headings and at least 200 words. Also add a field called notes with your safety advice.', schema, false);

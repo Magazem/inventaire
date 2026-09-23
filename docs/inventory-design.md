@@ -775,9 +775,30 @@ Test C is the one that matters most for this project: asked to list
 equipment that is NOT in the enum, the model returned an empty list rather
 than inventing `casque`. That is D52 working on a new provider.
 
-Consequences: both roles run on `gemini-3.5-flash`; one free quota
-(~1 500 requests/day) is enough — the backlog is a day and a half of
-background work. Model ids published anywhere were stale within weeks;
-`?list=1` asks the provider directly and is the only source to trust.
-The old research figures (2.5-generation ids, RPD tables) are void.
+**Then the project's own quota panel arrived and rewrote the choice.**
+Published free-tier tables were wrong by a factor of 75 for this project:
+
+```
+Gemini 3.5 Flash        5 RPM     20 / day    <- the probe alone spent 15
+Gemini 3.5 Flash Lite  15 RPM    500 / day
+Gemma 4 31B            30 RPM 14 400 / day
+```
+
+Re-run against the two with real quota:
+
+```
+gemma-4-31b-it        4 of 5 calls 503 "high demand"; the one that answered
+                      took 34 s and ended with a markdown fence — the schema
+                      is SUGGESTED to Gemma, not enforced. Out (D48).
+gemini-3.5-flash-lite A identical (after parsing — Gemini pretty-prints at
+                      random) · B {"nums":[]} · C {"epi":[]} · D both ways
+                      0.7 s per call                             -> PASS
+```
+
+The earlier Lite 400s were `reasoning_effort` being sent on every call; it
+now goes only when reasoning is on. **Both roles run on
+`gemini-3.5-flash-lite`**: 500 requests/day, so ~2 400 calls is five days
+of background work. Paid Flash removes the cap for a few euros if five days
+is too long. The panel — not any published table — is the only source of
+truth for limits; `?list=1` is the only source of truth for model ids.
 
