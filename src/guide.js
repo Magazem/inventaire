@@ -559,7 +559,21 @@ export async function probeGuideHandler(request, env, deps) {
  * one's result.
  */
 export async function probeLlmHandler(request, env) {
+  // ?write=<id>&translate=<id> try model ids WITHOUT a redeploy — the ids
+  // Google publishes go stale faster than we can research them.
+  const u = new URL(request.url);
   const cfg = llmConfig(env);
+  if (u.searchParams.get('write')) cfg.write = u.searchParams.get('write');
+  if (u.searchParams.get('translate')) cfg.translate = u.searchParams.get('translate');
+
+  // ?list=1 — ask the provider what it actually serves.
+  if (u.searchParams.get('list')) {
+    const r = await fetch(cfg.url.replace(/\/chat\/completions$/, '/models'),
+      { headers: { authorization: `Bearer ${cfg.key}` } });
+    const d = await r.json().catch(() => ({}));
+    const ids = (d.data || []).map(m => m.id).filter(id => /flash|lite|gemini/i.test(id)).sort();
+    return json({ status: r.status, models: ids, raw: ids.length ? undefined : d });
+  }
   const schema = { name: 'n', strict: true, schema: {
     type: 'object', additionalProperties: false, required: ['nums'],
     properties: { nums: { type: 'array', items: { type: 'integer' } } } } };
@@ -569,7 +583,7 @@ export async function probeLlmHandler(request, env) {
 
   const run = (user, sch, thinking, model) => callLongCat(env, {
     system: 'Answer the user.', user, schema: sch, maxTokens: 1500,
-    timeoutMs: 60_000, thinking, model });
+    timeoutMs: 60_000, thinking, model: model || (thinking ? cfg.write : cfg.translate) });
 
   const out = { config: { url: cfg.url, write: cfg.write, translate: cfg.translate,
                           key: cfg.key ? `set (${cfg.key.length})` : 'MISSING' } };
