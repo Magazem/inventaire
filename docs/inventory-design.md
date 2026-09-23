@@ -685,3 +685,72 @@ Everything is answered. What remains is one request and three things you'll only
 - **What it doesn't do.** Not a maintenance system, not a purchasing system. Stock movement tracking is deliberately postponed until the item list exists.
 - **What it needs from the company.** One half-day from someone who works with the machines, to confirm safety information (§5.7). And a small IT request: a shared folder readable by everyone.
 - **The approved safety rule.** Guides are AI-written from official manufacturer manuals. **Where no official manual is found, no guide is produced** — never an invented one. For machines where a wrong instruction could injure someone, a person who uses that machine approves the text before it is published. Protective-equipment pictograms are never left blank by default: an unreviewed machine says *"à définir"* rather than showing nothing (§7.5).
+
+
+### D58 — `introuvable` tells the worker who to ask
+
+When no manual can be sourced, the worker page does not show an empty
+guide or a silent gap. It shows: **"Mode d'emploi non disponible ici.
+Demandez-le à votre responsable. Nous en avons une version papier."**
+followed by the brand, model number and unit ID in a large bordered box.
+
+The box is the payload — a worker photographs it or reads it out. The
+company holds paper manuals for several machines (DeWalt confirmed), so
+this is a true and actionable instruction, not an apology.
+
+The four strings are **human-translated once and never machine-generated**.
+They appear exactly where the system has nothing else to offer, including on
+dangerous machines, where "ask your manager" failing to land is the
+difference between asking and guessing. Full text: `spec/strings-fallback.md`.
+
+This makes `introuvable` (D19) a *useful* terminal state rather than a dead
+end, and keeps it clearly distinct from `sans_objet`, which must never nag.
+
+
+### D67 — Tigrinya cancelled (8 Sep 2026, manager decision — option C)
+
+No Tigrinya guides, no Tigrinya fallback strings, no Google Cloud
+Translation key, no cross-engine check stage. `TARGET_LANGS` already
+excluded `ti`, so no pipeline change is needed; the `ti` entries seeded in
+`epi.noms` are harmless and stay.
+
+Languages are now six: **fr · en · de · it · pt · ar.**
+
+What this does NOT change, from the Tigrinya brief: the employer's duty to
+inform and train is discharged through training, not through this tool, and
+removing a language removes a help, not the duty. For Tigrinya-speaking
+workers the **pictogram channel is now the only thing the tool gives them**,
+which makes the P2 pictogram review — does the workshop colleague agree with
+the PPE and hazard icons on every dangerous machine? — the one safety review
+that covers everyone.
+
+
+### D68 — The LLM is configuration; Gemini replaces LongCat (23 Sep 2026)
+
+LongCat 2.0 was retired by its provider with most of the fleet captured and
+the guides half-written. The pipeline noticed only because one function,
+`callLongCat`, stopped answering — sourcing, slicing, PPE, validation and
+the queue never knew which model wrote the prose. That was the right shape;
+it is now explicit: `LLM_BASE_URL`, `LLM_MODEL_WRITE`, `LLM_MODEL_TRANSLATE`
+in `wrangler.toml`, `LLM_API_KEY` as a secret. Anything OpenAI-compatible
+with `json_schema` output can be dropped in.
+
+**Provider: Gemini's OpenAI-compatible endpoint, free tier.** No card;
+Flash and Flash-Lite only (Pro is behind billing); roughly 10 RPM and
+1 000–1 500 RPD per model. `reasoning_effort: "none"` is what LongCat's
+`thinking: disabled` was (D65 carries over unchanged). At ~2 400 calls for
+the whole inventory, the free tier is about two days of background work;
+paid Flash would be a few euros and no cap — free first.
+
+**Terms, stated plainly.** On the free tier Google may use prompts and
+outputs to improve its models; paid tiers do not. What is sent is
+manufacturer manual text and the guides derived from it — public documents,
+no names, no photos, no unit IDs. Acceptable for this data. The EU boundary
+built for R2 photos never extended to the model provider; LongCat was in
+China. Nothing about this decision changes that.
+
+**No credit carried over.** LongCat proved constrained decoding on 20 Aug.
+Gemini gets the same ladder, automated at `/api/probe/llm` — five identical
+runs, the hostile prompt, an enum under pressure, and the reasoning switch
+measured — and the pipeline is not re-queued until it reports PASS.
+

@@ -35,7 +35,7 @@ queue               = "inventaire-jobs"
 max_batch_size      = 1
 max_batch_timeout   = 5
 max_retries         = 3
-max_concurrency     = 4   # 429s back off 120 s; this probes LongCat's real ceiling
+max_concurrency     = 2   # Gemini free tier is ~10 requests/min per model; 429s back off 120 s
 
 # Daily sweep for stranded jobs
 [triggers]
@@ -43,9 +43,16 @@ crons = ["0 3 * * *"]
 
 [vars]
 SCHEMA_VERSION = "1"
+# The LLM is configuration. LongCat was retired mid-project (Sep 2026) and
+# the swap to Gemini's OpenAI-compatible endpoint was these lines plus one
+# secret. Keep it that way. Free tier: ~10 RPM / 1 500 RPD per model, and
+# Google may train on free-tier prompts (D68) — manual text only, no photos.
+LLM_BASE_URL        = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+LLM_MODEL_WRITE     = "gemini-2.5-flash"
+LLM_MODEL_TRANSLATE = "gemini-2.5-flash-lite"
 
-# The LongCat key is a WORKER SECRET, not in this repo and not in CI:
-#   npx wrangler secret put LONGCAT_API_KEY
+# Secrets are WORKER SECRETS, not in this repo and not in CI:
+#   npx wrangler secret put LLM_API_KEY       (Gemini key: aistudio.google.com -> Get API key)
 #   npx wrangler secret put SERPER_API_KEY
 # (Secrets Store was tried first — nicer hygiene, but its binding refused
 #  authorization at deploy despite correct token permission and workers

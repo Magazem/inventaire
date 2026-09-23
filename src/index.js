@@ -7,7 +7,7 @@ import { inspectPage } from './inspect-page.js';
 import { probePdfHandler } from './probe.js';
 import { probeSourceHandler, probeAcquireHandler,
          acquireManual, fetchMarkdown } from './source.js';
-import { probeGuideHandler } from './guide.js';
+import { probeGuideHandler, probeLlmHandler } from './guide.js';
 import { runJob, requeueMissing, nativeLanguages } from './pipeline.js';
 import { qualifyManual } from './source.js';
 import { provenance, detectLanguage } from './probe.js';
@@ -72,6 +72,7 @@ export default {
       if (p === '/api/probe/pdf') return probePdfHandler(request, env);
       if (p === '/api/probe/source') return probeSourceHandler(request, env);
       if (p === '/api/probe/acquire') return probeAcquireHandler(request, env);
+      if (p === '/api/probe/llm') return probeLlmHandler(request, env);
       if (p === '/api/probe/guide')
         return probeGuideHandler(request, env, { acquireManual, fetchMarkdown });
       if (p === '/api/models/lookup' && request.method === 'POST')
@@ -144,10 +145,14 @@ async function health(env) {
     out.bindings.queue = { ok: true, note: 'test message sent' };
   } catch (e) { out.ok = false; out.bindings.queue = { ok: false, error: String(e) }; }
 
-  const key = env.LONGCAT_API_KEY;
+  const key = env.LLM_API_KEY;
   const kok = typeof key === 'string' && key.length > 10;
-  out.bindings.longcat_key = { ok: kok, note: kok
-    ? `secret readable (${key.length} chars)` : 'not set' };
+  out.bindings.llm = { ok: kok,
+    url: env.LLM_BASE_URL || '(default: Gemini OpenAI-compatible)',
+    write: env.LLM_MODEL_WRITE || '(default)',
+    translate: env.LLM_MODEL_TRANSLATE || '(= write)',
+    key: kok ? `set (${key.length} chars)` : 'NOT SET — npx wrangler secret put LLM_API_KEY',
+    probe: '/api/probe/llm must PASS before re-queuing anything' };
   if (!kok) out.ok = false;
 
   out.bindings.ai = { ok: !!env.AI, note: env.AI

@@ -84,9 +84,11 @@ and *"Ce guide complète la formation. Il ne la remplace pas."*
 }
 ```
 
-## Tigrinya
+## Tigrinya — CANCELLED (D67, 8 Sep 2026)
 
-Deliberately left as `__A_TRADUIRE__` rather than machine-filled.
+The `ti` keys above are void. Kept only so the JSON shape is unchanged.
+
+*(Original note, for the record:)* Deliberately left as `__A_TRADUIRE__` rather than machine-filled.
 
 Four short sentences is the cheapest possible paid translation — this is
 option **D** from the Tigrinya brief at its smallest and least arguable

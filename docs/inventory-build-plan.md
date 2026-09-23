@@ -46,11 +46,11 @@ Read it as: **P0.1 and P0.2 have no predecessors and gate everything after them.
 | 12 real brand + model numbers | a site visit | P0.2 | ✔ **received 20 Aug** |
 | LongCat API key | you (have it) | P0.2 | ✔ |
 | Cloudflare account | you, 10 min | P1 | not yet |
-| Google Cloud Translation key (Tigrinya cross-check) | you, ~15 min | P1.2 | not yet |
+| ~~Google Cloud Translation key (Tigrinya cross-check)~~ | — | — | **not needed — Tigrinya cancelled, D67** |
 | *(nothing new for P0.3 — reuses the 12 machines)* | — | P0.3 | ✔ |
 | Workshop colleague, ~half a day | your team | P2, and again in P3 | available ✔ |
-| A Tigrinya-speaking worker, 10 min | your team | P2 comprehension test | — |
-| Manager decision on Tigrinya | your manager | before P3 | brief written, asking tomorrow |
+| ~~A Tigrinya-speaking worker, 10 min~~ | — | — | **cancelled, D67** |
+| Manager decision on Tigrinya | your manager | before P3 | ✔ **option C — cancelled, 8 Sep (D67)** |
 | `\\SERVER\inventaire` share | IT | **end of P4** — not before | asking tomorrow |
 | Backup scope confirmation | IT | P5 (documentation) | same conversation |
 | Group Policy shortcut push | IT | P5, optional | same conversation |
@@ -719,6 +719,91 @@ derivable from the model. A STIHL rule is worth an hour before P3.
 
 ---
 
+### P1.2 RUN #12 — 8 Sep 2026, afternoon: P1 EXIT GATE PASSED
+
+**The gate:** *photograph an item and see a finished, translated guide
+appear a minute later, without touching anything else.*
+
+**Passed by Walid, not by a test.** Husqvarna 120iB captured at 11:43:38;
+manufacturer manual found from `www-static-nw.husqvarna.com` at 11:43:38;
+English guide written `native` at 11:45:09; first translation 30 seconds
+later; six languages within minutes. Nobody touched anything.
+
+Two hours after the morning's fixes, the board:
+
+```
+6/6 done   Makita GA5030R · Maxx PN13150 · Fuxtec FX-EB162 · Husqvarna 445 · STIHL HT101
+5/6 live   STIHL HS45 · STIHL HSA 45 · Husqvarna T435
+running    Husqvarna 545RXT · 120iB · Wagner W550 · STIHL MS180, FS 260C, HL94
+```
+
+**Four findings from the afternoon, in the order they were found.**
+
+**1. "http" was 524.** LongCat's API sits behind Cloudflare with a 100 s
+origin timeout; a guide took 75–100 s. Roughly a third of guide calls were
+dying to a proxy, not to the model. Fixed with `stream: true` — with bytes
+flowing, nothing in the chain hangs up. Last 524 at 09:20; none since.
+
+**2. LongCat was "a bottleneck" for three reasons, only one of them theirs.**
+Asked *why*, and the answer was: (a) the model reasons for 9–14 k characters
+before writing — inherent; (b) `max_concurrency = 2` — my number; (c) at a
+handful of concurrent calls it returned *"cluster overloaded"* — theirs.
+The docs have a `thinking: {type: "disabled"}` parameter that removes (a)
+outright.
+
+=> **D65: reasoning ON for the one call per model that writes from the
+manual, OFF for the five translations.** Measured on the same Makita
+French guide: reasoning off is **45 s instead of 75–100 s** and every
+negation, PPE id and hazard is still right — but it TRANSCRIBES rather than
+DISTILS: 63 safety items instead of 20, with fragments like *"Il n'a pas été
+conçu pour cela."* standing alone. For a worker at a machine, 20 chosen
+items beat 63 faithful ones. Translation inherits the pivot's shape, so it
+needs no deliberation. Translations now take **5–15 s**. Six landed in
+47 seconds.
+
+Also found: LongCat's schema mode enforces shape and enums but **not
+`maxItems`** — the schema said 20 and the model returned 63. Structure is
+still validated in code; nothing downstream trusted the number.
+
+**3. The speed-up exposed a race that had been latent since the pipeline was
+built.** Each job read the whole `guides` JSON, added its language, and
+wrote it all back. Four fast translations finishing within the same second
+read the same snapshot, and **last writer wins** — STIHL HS45 had
+Portuguese for a minute, then it was gone. With two slow consumers this
+almost never collided.
+
+=> **D66: one language, one atomic write.** `json_set` on the single key in
+one statement; the "all six done?" rollup computed from a fresh read after
+the write, never from the job's own stale copy. Verified against SQLite
+directly, then live: Maxx went 1/6 → 6/6 in forty seconds and stayed there.
+
+**4. Guide jobs were not idempotent.** *Relancer tout* clicked three times in
+a minute queued every job three times; translations already skipped when
+present, guides did not. Fixed, plus a one-minute debounce on the button.
+Long items are now split at sentence boundaries rather than failing the
+guide (MS180's English died on "1 item over 400 chars" — a correct
+instruction, merely long). Whole-document input capped at 100 k characters.
+
+**Throughput, honestly stated.** Morning: ~1 guide/minute, most of them
+dying to 524. Afternoon: a native guide in ~90 s, then five translations in
+under a minute — a complete model in roughly 3 minutes, four models in
+parallel. **400 items × ~4 languages is now an afternoon, not two days.**
+
+**P1 is closed.** What remains before P2 is not pipeline work:
+
+- **Model-number hygiene.** `95`, `ROTARY SANDER`, `ART.21200`, `066` were
+  entered today. The pipeline cannot find what it is not told. One line
+  under the field — *copy exactly what is on the plate, letters included* —
+  and the capture screen should refuse a bare number.
+- **The type field.** `MACHINE` ×7, `MACHAINE`, `TAILLEUR`, `SOUFLEUR`,
+  `SOUFFLEUSE`, `SCIECICLAIRE`, `PISTOLETDEPRINTURE`. Two people, one day.
+  Curated list with suggestions, and a merge tool, before bulk.
+- **Upload is live and has customers:** STIHL BG86, 066, FS300, Bosch
+  PBS 75 A, Einhell DSI150, Honda HRH536. Bosch and Einhell have verified
+  URL rules from P0.3 keyed on order/article numbers — an hour to wire.
+
+---
+
 ## P1 — Foundations
 
 **Entry:** ✔ all clear. P0.1 closed, P0.2 passed (bar Tigrinya), P0.3 done, 1.1 frozen. **Nothing blocks P1.2.**
@@ -733,7 +818,7 @@ derivable from the model. A STIHL rule is worth an hour before P3.
 
 1.1 must finish before 1.2 and 1.3 start. 1.2 and 1.3 can then run in parallel.
 
-**Exit gate:** you can photograph an item on your phone and see a finished, translated guide appear a minute later, without touching anything else.
+**Exit gate:** you can photograph an item on your phone and see a finished, translated guide appear a minute later, without touching anything else. ✔ **PASSED 8 Sep 2026** — Husqvarna 120iB, captured by Walid, six languages, nobody touched anything.
 
 ---
 

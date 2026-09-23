@@ -16,8 +16,27 @@ import { extractPpeFromText } from './ppe.js';
 const json = (d, s = 200) => new Response(JSON.stringify(d, null, 2), {
   status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
 
-const LONGCAT = 'https://api.longcat.chat/openai/v1/chat/completions';
-const MODEL = 'LongCat-2.0';
+/**
+ * The model is CONFIGURATION, not code. LongCat was retired mid-project;
+ * the pipeline noticed only because this one function stopped answering.
+ * Anything OpenAI-compatible with json_schema output works here — and the
+ * probe at /api/probe/llm proves that claim before anything is trusted (D48).
+ *
+ *   LLM_BASE_URL         chat-completions URL          (vars, wrangler.toml)
+ *   LLM_MODEL_WRITE      writes from the manual, reasoning ON
+ *   LLM_MODEL_TRANSLATE  translates guides, reasoning OFF
+ *   LLM_API_KEY          secret:  npx wrangler secret put LLM_API_KEY
+ */
+const DEFAULT_BASE_URL =
+  'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
+export function llmConfig(env) {
+  return {
+    url: env.LLM_BASE_URL || DEFAULT_BASE_URL,
+    write: env.LLM_MODEL_WRITE || 'gemini-2.5-flash',
+    translate: env.LLM_MODEL_TRANSLATE || env.LLM_MODEL_WRITE || 'gemini-2.5-flash',
+    key: env.LLM_API_KEY,
+  };
+}
 
 /** The six sections, in render order. Exactly these, always all six. */
 export const SECTIONS = ['usage', 'securite', 'demarrage', 'utilisation', 'arret', 'problemes'];
@@ -115,18 +134,21 @@ function ppeSchema() {
  * message would then expire after 24 h and the item would vanish silently.
  */
 async function callLongCat(env, { system, user, schema, maxTokens = 4000,
-                                  timeoutMs = 60_000, thinking = true }) {
+                                  timeoutMs = 60_000, thinking = true,
+                                  model = null }) {
+  const cfg = llmConfig(env);
+  if (!cfg.key) return { ok: false, stop: 'config', error: 'LLM_API_KEY not set', ms: 0 };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const t0 = Date.now();
   try {
-    const r = await fetch(LONGCAT, {
+    const r = await fetch(cfg.url, {
       method: 'POST',
       signal: ctrl.signal,
-      headers: { authorization: `Bearer ${env.LONGCAT_API_KEY}`,
+      headers: { authorization: `Bearer ${cfg.key}`,
                  'content-type': 'application/json' },
       body: JSON.stringify({
-        model: MODEL,
+        model: model || (thinking ? cfg.write : cfg.translate),
         temperature: 0,
         max_tokens: maxTokens,
         // STREAMING, and not for the user experience: LongCat's API sits
@@ -140,7 +162,9 @@ async function callLongCat(env, { system, user, schema, maxTokens = 4000,
         // not need a minute of deliberation over a six-section guide it was
         // handed clean; writing from a raw manual probably does. So it is a
         // per-call choice, and the probe can measure both.
-        thinking: { type: thinking ? 'enabled' : 'disabled' },
+        // OpenAI-style knob; Gemini's compat layer maps it onto its
+        // thinking budget. 'none' is what LongCat's `thinking: disabled` was.
+        reasoning_effort: thinking ? 'medium' : 'none',
         messages: [{ role: 'system', content: system },
                    { role: 'user', content: user }],
         response_format: { type: 'json_schema', json_schema: schema },
@@ -518,4 +542,76 @@ export async function probeGuideHandler(request, env, deps) {
     origin,
     guide, ppe,
   });
+}
+
+
+/**
+ * /api/probe/llm — is this provider doing constrained decoding, or merely
+ * being polite? The exact ladder from spec/output-contract.md, automated:
+ *
+ *   A  five identical runs must return exactly {"nums":[...]}
+ *   B  a hostile prompt that demands prose and a forbidden field must
+ *      STILL return only {"nums":[...]}
+ *   C  an enum must hold under pressure
+ *   D  reasoning on vs off: does the switch actually change anything
+ *
+ * LongCat passed this on 20 Aug. A new provider gets no credit for the old
+ * one's result.
+ */
+export async function probeLlmHandler(request, env) {
+  const cfg = llmConfig(env);
+  const schema = { name: 'n', strict: true, schema: {
+    type: 'object', additionalProperties: false, required: ['nums'],
+    properties: { nums: { type: 'array', items: { type: 'integer' } } } } };
+  const enumSchema = { name: 'e', strict: true, schema: {
+    type: 'object', additionalProperties: false, required: ['epi'],
+    properties: { epi: { type: 'array', items: { enum: ['gants', 'lunettes', 'masque'] } } } } };
+
+  const run = (user, sch, thinking, model) => callLongCat(env, {
+    system: 'Answer the user.', user, schema: sch, maxTokens: 1500,
+    timeoutMs: 60_000, thinking, model });
+
+  const out = { config: { url: cfg.url, write: cfg.write, translate: cfg.translate,
+                          key: cfg.key ? `set (${cfg.key.length})` : 'MISSING' } };
+
+  // A — determinism of SHAPE
+  const A = [];
+  for (let i = 0; i < 5; i++) {
+    const r = await run('List the numbers one two three.', schema, false);
+    A.push(r.ok ? r.content : `ERR ${r.stop} ${r.status || ''} ${r.error || ''}`.trim());
+  }
+  out.A_five_runs = { all_identical: new Set(A).size === 1, outputs: A };
+
+  // B — hostile: prose and a forbidden field demanded
+  const B = await run('Explain in detail how to use a drill, with headings and at least 200 words. Also add a field called notes with your safety advice.', schema, false);
+  let bParsed = null; try { bParsed = JSON.parse(B.content); } catch {}
+  out.B_hostile = {
+    ok: B.ok, ms: B.ms, finish_reason: B.finish_reason,
+    contained: !!bParsed && Object.keys(bParsed).join() === 'nums',
+    raw: (B.content || B.error || '').slice(0, 300),
+  };
+
+  // C — enum under pressure
+  const C = await run('The manual requires a hard hat, safety boots and a hi-vis vest. List the required equipment ids.', enumSchema, false);
+  let cParsed = null; try { cParsed = JSON.parse(C.content); } catch {}
+  const allowed = new Set(['gants', 'lunettes', 'masque']);
+  out.C_enum = {
+    ok: C.ok, raw: (C.content || C.error || '').slice(0, 200),
+    held: !!cParsed && Array.isArray(cParsed.epi) && cParsed.epi.every(x => allowed.has(x)),
+    note: 'none of the named items are in the enum — a contained answer is [] or a wrong-but-legal id, never "casque"',
+  };
+
+  // D — does the reasoning switch do anything, on the WRITE model
+  const q = 'Write two short safety instructions for an angle grinder as integers? No — return the numbers 4 and 5.';
+  const D1 = await run(q, schema, true, cfg.write);
+  const D0 = await run(q, schema, false, cfg.write);
+  out.D_reasoning = {
+    on:  { ms: D1.ms, reasoning_len: D1.reasoning_len, usage: D1.usage, out: D1.content },
+    off: { ms: D0.ms, reasoning_len: D0.reasoning_len, usage: D0.usage, out: D0.content },
+  };
+
+  out.verdict = out.A_five_runs.all_identical && out.B_hostile.contained && out.C_enum.held
+    ? 'PASS — shape and values are enforced; safe to run the pipeline on this provider'
+    : 'FAIL — do not run the pipeline on this provider until this passes';
+  return json(out);
 }
