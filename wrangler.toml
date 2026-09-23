@@ -48,8 +48,8 @@ SCHEMA_VERSION = "1"
 # secret. Keep it that way. Free tier: ~10 RPM / 1 500 RPD per model, and
 # Google may train on free-tier prompts (D68) — manual text only, no photos.
 LLM_BASE_URL        = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-LLM_MODEL_WRITE     = "gemini-3.5-flash-lite"   # 3.5 Flash is 20 req/DAY on this project; Lite is 500
-LLM_MODEL_TRANSLATE = "gemini-3.5-flash-lite"   # candidates: gemma-4-31b-it (14 400/day) once probed
+LLM_MODEL_WRITE     = "gemini-3.5-flash"        # 20/day here, but ~90 native writes total; Lite wrote 6 safety items where Flash writes 20
+LLM_MODEL_TRANSLATE = "gemini-3.5-flash-lite"   # 500/day, 0.7 s/call, passed the ladder (D69)
 
 # Secrets are WORKER SECRETS, not in this repo and not in CI:
 #   npx wrangler secret put LLM_API_KEY       (Gemini key: aistudio.google.com -> Get API key)
