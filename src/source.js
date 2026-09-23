@@ -381,7 +381,9 @@ const EXTRA_INSTRUCTION_PHRASES = [
   'original instructions', 'read this manual',
   'sicherheitsvorschriften', 'vor der inbetriebnahme', 'motor abstellen',
   'norme di sicurezza', 'prima dell uso',
-  'normas de seguranca', 'antes de utilizar',
+  'normas de seguranca', 'antes de utilizar', 'indicacoes de seguranca',
+  'instrucoes de seguranca', 'tecnicas de trabalho', 'antes de ligar o motor',
+  'desligar o motor', 'desligue o motor', 'manutencao', 'precaucoes',
   'normas de seguridad', 'antes de usar',
 ];
 
@@ -469,7 +471,17 @@ export function qualifyManual(md, canonModel, url = '') {
     reasons.push(`parts catalogue / exploded view (${parts.slice(0, 2).join(', ')}; ` +
                  `digit ratio ${digitRatio.toFixed(2)})`);
   }
-  if (instruction.length < 3) { verdict = 'reject'; reasons.push(`only ${instruction.length} instruction phrases`); }
+  // The phrase count exists to catch catalogues and spec sheets, not to
+  // veto a manual whose language the list covers poorly. STIHL FS300: 44
+  // pages, model named 15 times exactly, Portuguese, one phrase matched —
+  // refused. A long document that names the model that often, with no
+  // parts or sales signals and at least one instruction phrase, is a
+  // manual whatever the phrase list thinks of its vocabulary.
+  const strongMention = modelHits >= 5 && (mention.form === 'exact' || mention.form === 'core');
+  const manualShaped = pages >= 20 && md.length >= 40_000 && !parts.length && sales.length < 2;
+  if (instruction.length < 3 && !(strongMention && manualShaped && instruction.length >= 1)) {
+    verdict = 'reject'; reasons.push(`only ${instruction.length} instruction phrases`);
+  }
   if (md.length < 8000) { verdict = 'reject'; reasons.push('too short to be a manual'); }
   if (sales.length >= 2 && instruction.length < 6) {
     verdict = 'reject'; reasons.push(`reads like sales material (${sales.join(', ')})`);
